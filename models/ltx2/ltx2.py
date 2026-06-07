@@ -445,7 +445,7 @@ def _normalize_temporal_overlap(overlap_frames: int, tile_frames: int) -> int:
     return overlap_frames
 
 
-def _build_tiling_config(tile_size: int | tuple | list | None, num_frames: int | None) -> TilingConfig | None:
+def _build_tiling_config(tile_size: int | tuple | list | None, fps: float | None) -> TilingConfig | None:
     temporal_tiling_divisor = 1
     spatial_config = None
     if isinstance(tile_size, (tuple, list)):
@@ -465,9 +465,9 @@ def _build_tiling_config(tile_size: int | tuple | list | None, num_frames: int |
             spatial_config = SpatialTilingConfig(tile_size_in_pixels=tile_size, tile_overlap_in_pixels=overlap)
 
     temporal_config = None
-    if num_frames is not None and num_frames > 241:
+    if fps is not None and fps > 0:
         temporal_tiling_divisor = max(1, temporal_tiling_divisor)
-        tile_frames = _normalize_temporal_tiling_size(int(math.ceil(232 / temporal_tiling_divisor)))
+        tile_frames = _normalize_temporal_tiling_size(int(math.ceil(float(fps) * 5.0 / temporal_tiling_divisor)))
         if tile_frames > 0:
             overlap_frames = int(round(tile_frames * 3 / 8))
             overlap_frames = _normalize_temporal_overlap(overlap_frames, tile_frames)
@@ -1014,16 +1014,29 @@ class LTX2:
         set_progress_status=None,
         VAE_tile_size=None,
         guide_phases= 1,
+        custom_settings=None,
+        video_guide=None,
+        frame_window_options=None,
+        gen_state=None,
+        input_video_is_hdr: bool = False,
+        lora_dir: str | None = None,
+        joyai_single_window: bool = False,
         **kwargs,
     ):
         if self._interrupt:
             return None
-
+        if self.model_def.get("joyai_echo", False) and not joyai_single_window:
+            from .joyai_echo import generate_joyai_echo_window
+            call_args = locals().copy()
+            call_args.pop("self")
+            extra_kwargs = call_args.pop("kwargs")
+            call_args.update(extra_kwargs)
+            return generate_joyai_echo_window(self, self.generate, **call_args)
         distill = self.model_def.get("ltx2_pipeline", "two_stage") == "distilled"
         editanything = _is_editanything_model(self.model_def)
         hdr_enabled = self.base_model_type == "ltx2_22B" and VIDEO_PROMPT_HDR_OUTPUT_FLAG in video_prompt_type
-        input_video_is_hdr = bool(kwargs.get("input_video_is_hdr", False))
-        hdr_scene_context = self._load_hdr_scene_context(kwargs.get("lora_dir")) if hdr_enabled else None
+        input_video_is_hdr = bool(input_video_is_hdr)
+        hdr_scene_context = self._load_hdr_scene_context(lora_dir) if hdr_enabled else None
         if hdr_enabled:
             NAG_scale = 1.0
             audio_prompt_type = ""
@@ -1195,7 +1208,7 @@ class LTX2:
 
         _append_injected_ref_entries(guiding_images, guiding_images_stage2)
 
-        tiling_config = _build_tiling_config(VAE_tile_size, frame_num)
+        tiling_config = _build_tiling_config(VAE_tile_size, fps)
         interrupt_check = lambda: self._interrupt
         text_connectors = text_connectors or getattr(self, "_text_connectors", None)
         editanything_ref_images = input_ref_images if editanything else None
@@ -1449,7 +1462,10 @@ class LTX2:
             )
 
         latent_slice = None
-        if isinstance(pipeline_output, tuple) and len(pipeline_output) == 3:
+        memory_latents = None
+        if isinstance(pipeline_output, tuple) and len(pipeline_output) == 4:
+            video, audio, latent_slice, memory_latents = pipeline_output
+        elif isinstance(pipeline_output, tuple) and len(pipeline_output) == 3:
             video, audio, latent_slice = pipeline_output
         else:
             video, audio = pipeline_output
@@ -1496,4 +1512,6 @@ class LTX2:
             result["hdr_transform"] = LTX2_HDR_TRANSFORM
         if latent_slice is not None:
             result["latent_slice"] = latent_slice
+        if memory_latents is not None:
+            result["_memory_latents"] = memory_latents
         return result
