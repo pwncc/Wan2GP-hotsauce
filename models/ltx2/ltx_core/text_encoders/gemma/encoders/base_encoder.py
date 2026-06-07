@@ -12,6 +12,7 @@ from ..embeddings_connector import Embeddings1DConnector
 from ..feature_extractor import GemmaFeaturesExtractorProjLinear
 from ..tokenizer import LTXVGemmaTokenizer
 from shared.utils import files_locator as fl
+from shared.utils.hot_models import ensure_text_encoder_models_on_gpu, global_keep_models_hot_enabled
 from .....ltx2_handler import  _GEMMA_FOLDER, family_handler
 
 import os
@@ -50,12 +51,24 @@ class GemmaTextEncoderModelBase(torch.nn.Module):
     def encode_raw(self, text: str, padding_side: str = "left") -> "RawTextEmbeddings":
         return self.encode_raw_batch([text], padding_side=padding_side)[0]
 
+    def _encode_device(self) -> torch.device:
+        if global_keep_models_hot_enabled() and torch.cuda.is_available():
+            return torch.device("cuda", torch.cuda.current_device())
+        try:
+            param = next(self.model.parameters())
+            if param.is_cuda:
+                return param.device
+        except StopIteration:
+            pass
+        return self.model.device
+
     def encode_raw_batch(self, texts: list[str], padding_side: str = "left") -> list["RawTextEmbeddings"]:
         if not texts:
             return []
+        device = self._encode_device()
         token_rows = [self.tokenizer.tokenize_with_weights(text)["gemma"] for text in texts]
-        input_ids = torch.tensor([[token[0] for token in row] for row in token_rows], device=self.model.device)
-        attention_mask = torch.tensor([[token[1] for token in row] for row in token_rows], device=self.model.device)
+        input_ids = torch.tensor([[token[0] for token in row] for row in token_rows], device=device)
+        attention_mask = torch.tensor([[token[1] for token in row] for row in token_rows], device=device)
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         hidden_states = outputs.hidden_states
         return [
@@ -403,6 +416,7 @@ def encode_text(text_encoder: GemmaTextEncoderModelBase, prompts: list[str]) -> 
     """
     if not prompts:
         return []
+    ensure_text_encoder_models_on_gpu(force=True)
     return text_encoder.encode_raw_batch(prompts)
 
 

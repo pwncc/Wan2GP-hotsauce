@@ -77,7 +77,7 @@ from shared.utils.process_locks import (
     unregister_GPU_resident,
 )
 from shared.utils.model_unload import model_unload_guard, wait_for_model_unload
-from shared.utils.hot_models import enable_keep_models_hot, load_all_models_to_vram, set_global_keep_models_hot, unload_all_unless_hot
+from shared.utils.hot_models import enable_keep_models_hot, load_all_models_to_vram, register_offload_manager, set_global_keep_models_hot, unload_all_unless_hot
 from shared.deepy.config import get_deepy_default_runtime_config, set_deepy_runtime_config
 from shared.loras_migration import migrate_loras_layout
 from shared.utils import files_locator as fl 
@@ -230,6 +230,7 @@ def release_model():
     if offloadobj is not None:
         offloadobj.release()
         offloadobj = None
+    register_offload_manager(None)
     offload.flush_torch_caches()
     gc.collect()
     reload_needed = True
@@ -3784,8 +3785,18 @@ def init_pipe(pipe, kwargs, profile):
     kwargs["extraModelsToQuantize"]=  None
     if args.keep_models_hot:
         kwargs["budgets"] = None
-        kwargs["pinnedMemory"] = False
         kwargs["asyncTransfers"] = False
+        text_encoder_pins = [
+            model_id
+            for model_id in (
+                "text_encoder",
+                "text_encoder_2",
+                "text_embedding_projection",
+                "text_embeddings_connector",
+            )
+            if model_id in pipe
+        ]
+        kwargs["pinnedMemory"] = text_encoder_pins if text_encoder_pins else False
         return int(profile_type.LowRAM_HighVRAM)
 
     source_budgets = kwargs.get("budgets", None)
@@ -4013,8 +4024,9 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         compile_modules = model_def.get("compile", compile) if len(compile) > 0 else False
         if compile_modules == False and len(compile):
             _load_models_info("Pytorch compilation is not supported for this Model")
-        # kwargs["pinnedMemory"] = "text_encoder"
+        # Text encoder modules stay pinned in VRAM when --keep-models-hot is enabled.
         offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)
+        register_offload_manager(offloadobj)
         if args.keep_models_hot:
             enable_keep_models_hot(offloadobj)
             load_all_models_to_vram(offloadobj)

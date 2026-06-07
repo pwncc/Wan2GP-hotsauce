@@ -12,6 +12,7 @@ from accelerate import init_empty_weights
 from safetensors.torch import load_file
 from shared.utils import files_locator as fl
 from shared.utils.hdr import VIDEO_PROMPT_HDR_OUTPUT_FLAG, hdr_linear_to_vae_range
+from shared.utils.hot_models import ensure_text_encoder_models_on_gpu
 
 from .ltx_core.conditioning import AudioConditionByLatent, AudioConditionByLatentPrefix, AudioConditionByReferenceLatent
 from .ltx_core.model.audio_vae import (
@@ -1351,6 +1352,8 @@ class LTX2:
         if int(window_no or 1) > 1 or (input_video is not None and not is_start_image_only):
             prompt_relay_frame_offset = max(0, int(prefix_frames_count or 0))
         ltx2_22B_class = self.model_def.get("ltx2_22B_class", False)
+
+        ensure_text_encoder_models_on_gpu(kwargs.get("offloadobj"), force=True)
 
         if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
             pipeline_output = self.pipeline(
