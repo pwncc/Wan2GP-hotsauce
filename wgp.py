@@ -3785,18 +3785,8 @@ def init_pipe(pipe, kwargs, profile):
     kwargs["extraModelsToQuantize"]=  None
     if args.keep_models_hot:
         kwargs["budgets"] = None
+        kwargs["pinnedMemory"] = False
         kwargs["asyncTransfers"] = False
-        text_encoder_pins = [
-            model_id
-            for model_id in (
-                "text_encoder",
-                "text_encoder_2",
-                "text_embedding_projection",
-                "text_embeddings_connector",
-            )
-            if model_id in pipe
-        ]
-        kwargs["pinnedMemory"] = text_encoder_pins if text_encoder_pins else False
         return int(profile_type.LowRAM_HighVRAM)
 
     source_budgets = kwargs.get("budgets", None)
@@ -4024,12 +4014,12 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         compile_modules = model_def.get("compile", compile) if len(compile) > 0 else False
         if compile_modules == False and len(compile):
             _load_models_info("Pytorch compilation is not supported for this Model")
-        # Text encoder modules stay pinned in VRAM when --keep-models-hot is enabled.
         offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)
         register_offload_manager(offloadobj)
         if args.keep_models_hot:
             enable_keep_models_hot(offloadobj)
             load_all_models_to_vram(offloadobj)
+            print("[keep-models-hot] Pipeline models preloaded into VRAM (no reserved-RAM pinning).")
     if len(args.gpu) > 0:
         torch.set_default_device(args.gpu)
     transformer_type = model_type
