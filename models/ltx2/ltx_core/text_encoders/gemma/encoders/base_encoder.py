@@ -416,7 +416,7 @@ def encode_text(text_encoder: GemmaTextEncoderModelBase, prompts: list[str]) -> 
     """
     if not prompts:
         return []
-    ensure_text_encoder_models_on_gpu(force=True)
+    ensure_text_encoder_models_on_gpu()
     return text_encoder.encode_raw_batch(prompts)
 
 

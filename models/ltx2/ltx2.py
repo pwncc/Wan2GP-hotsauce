@@ -1353,7 +1353,7 @@ class LTX2:
             prompt_relay_frame_offset = max(0, int(prefix_frames_count or 0))
         ltx2_22B_class = self.model_def.get("ltx2_22B_class", False)
 
-        ensure_text_encoder_models_on_gpu(kwargs.get("offloadobj"), force=True)
+        ensure_text_encoder_models_on_gpu(kwargs.get("offloadobj"))
 
         if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
             pipeline_output = self.pipeline(

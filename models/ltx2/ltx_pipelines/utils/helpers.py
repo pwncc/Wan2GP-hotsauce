@@ -51,10 +51,13 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
+from shared.utils.hot_models import release_cuda_cache_if_needed
+
+
 def cleanup_memory() -> None:
-    gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    release_cuda_cache_if_needed()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 def image_conditionings_by_replacing_latent(

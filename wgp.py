@@ -77,7 +77,7 @@ from shared.utils.process_locks import (
     unregister_GPU_resident,
 )
 from shared.utils.model_unload import model_unload_guard, wait_for_model_unload
-from shared.utils.hot_models import enable_keep_models_hot, load_all_models_to_vram, register_offload_manager, set_global_keep_models_hot, unload_all_unless_hot
+from shared.utils.hot_models import enable_keep_models_hot, load_all_models_to_vram, register_offload_manager, release_cuda_cache_if_needed, set_global_keep_models_hot, unload_all_unless_hot
 from shared.deepy.config import get_deepy_default_runtime_config, set_deepy_runtime_config
 from shared.loras_migration import migrate_loras_layout
 from shared.utils import files_locator as fl 
@@ -6809,7 +6809,7 @@ def generate_video(
             raise gr.Error("Error while loading Loras: " + ", ".join(error_files))
         if trans2_lora is not None: 
             offload.sync_models_loras(trans_lora, trans2_lora)
-        load_all_models_to_vram(offloadobj, force=True)
+        load_all_models_to_vram(offloadobj, force=not args.keep_models_hot)
     else:
         load_all_models_to_vram(offloadobj)
         
@@ -7048,7 +7048,7 @@ def generate_video(
     os.makedirs(image_save_path, exist_ok=True)
     os.makedirs(audio_save_path, exist_ok=True)
     gc.collect()
-    torch.cuda.empty_cache()
+    release_cuda_cache_if_needed()
     wan_model._interrupt = False
     abort = False
     if gen.get("abort", False):
@@ -7408,7 +7408,7 @@ def generate_video(
                             face_arc_embeds = face_arc_embeds.squeeze(0).cpu()
                             face_encoder = image_pil = None
                             gc.collect()
-                            torch.cuda.empty_cache()
+                            release_cuda_cache_if_needed()
 
                         if remove_background_images_ref > 0:
                             send_cmd("progress", [0, get_latest_status(state, "Removing Images References Background")])
@@ -7738,8 +7738,7 @@ def generate_video(
             gen["defer_model_unload"] = samples is not None
             if not gen["defer_model_unload"]:
                 unload_all_unless_hot(offloadobj)
-                gc.collect()
-                torch.cuda.empty_cache()
+                release_cuda_cache_if_needed()
 
             if samples == None:
                 abort = True
@@ -7960,8 +7959,7 @@ def generate_video(
 
                 if gen.pop("defer_model_unload", False):
                     unload_all_unless_hot(offloadobj)
-                    gc.collect()
-                    torch.cuda.empty_cache()
+                    release_cuda_cache_if_needed()
 
                 end_time = time.time()
 
@@ -8026,14 +8024,14 @@ def generate_video(
         seed = set_seed(-1)
     if gen.pop("defer_model_unload", False):
         unload_all_unless_hot(offloadobj)
-        gc.collect()
-        torch.cuda.empty_cache()
+        release_cuda_cache_if_needed()
     gen_state = plugin_data = None
     clear_status(state)
     trans.cache = None
-    offload.unload_loras_from_model(trans_lora)
-    if not trans2_lora is None:
-        offload.unload_loras_from_model(trans2_lora)
+    if not args.keep_models_hot:
+        offload.unload_loras_from_model(trans_lora)
+        if not trans2_lora is None:
+            offload.unload_loras_from_model(trans2_lora)
 
     if not trans2 is None:
        trans2.cache = None
