@@ -491,6 +491,70 @@ class Qwen35AssistantRuntime:
         self._seal_sequence(seq)
         return "chunk_prefilled" if suffix else "extended"
 
+    def append_embedded_suffix(
+        self,
+        prompt_token_ids: list[int],
+        prompt_embeds,
+        prompt_position_ids,
+        *,
+        position_offset: int = 0,
+    ) -> str:
+        seq = self._get_active_sequence()
+        if seq is None:
+            raise RuntimeError("Assistant context is not initialized.")
+        suffix = [int(token_id) for token_id in list(prompt_token_ids or [])]
+        if len(suffix) == 0:
+            return "extended"
+        if prompt_embeds is None or prompt_position_ids is None:
+            raise RuntimeError("Embedded suffix requires prompt_embeds and prompt_position_ids.")
+        llm = self._get_live_llm()
+        old_num_tokens = int(seq.num_tokens)
+        new_num_tokens = old_num_tokens + len(suffix)
+        suffix_embeds = prompt_embeds
+        if suffix_embeds.ndim != 2 or int(suffix_embeds.shape[0]) != len(suffix):
+            raise RuntimeError("Embedded suffix prompt_embeds shape does not match suffix token count.")
+        suffix_position_ids = prompt_position_ids
+        if suffix_position_ids.ndim == 3:
+            suffix_position_ids = suffix_position_ids[:, 0]
+        if suffix_position_ids.ndim != 2 or int(suffix_position_ids.shape[1]) != len(suffix):
+            raise RuntimeError("Embedded suffix prompt_position_ids shape does not match suffix token count.")
+        full_embeds = torch.zeros(
+            (new_num_tokens, int(suffix_embeds.shape[1])),
+            dtype=suffix_embeds.dtype,
+            device=suffix_embeds.device,
+        )
+        full_embeds[old_num_tokens:new_num_tokens] = suffix_embeds
+        position_shift = old_num_tokens + int(getattr(seq, "position_offset", 0) or 0)
+        shifted_position_ids = suffix_position_ids.to(dtype=suffix_position_ids.dtype) + int(position_shift)
+        full_position_ids = torch.zeros(
+            (3, new_num_tokens),
+            dtype=shifted_position_ids.dtype,
+            device=shifted_position_ids.device,
+        )
+        full_position_ids[:, old_num_tokens:new_num_tokens] = shifted_position_ids
+        seq.token_ids.extend(suffix)
+        seq.last_token = int(seq.token_ids[-1])
+        seq.num_tokens = new_num_tokens
+        seq.prompt_embeds = full_embeds
+        seq.prompt_position_ids = full_position_ids
+        seq.position_offset = int(getattr(seq, "position_offset", 0) or 0) + int(position_offset or 0)
+        if not llm.scheduler.block_manager.can_prompt_append(seq, old_num_tokens):
+            del seq.token_ids[old_num_tokens:]
+            seq.num_tokens = old_num_tokens
+            seq.last_token = int(seq.token_ids[-1]) if seq.token_ids else 0
+            seq.num_cached_tokens = min(int(getattr(seq, "num_cached_tokens", old_num_tokens) or 0), old_num_tokens)
+            seq.clear_prompt_data()
+            raise RuntimeError("Assistant embedded suffix prefill exceeded the available KV cache blocks.")
+        llm.scheduler.block_manager.begin_prompt_append(seq, old_num_tokens)
+        seq.num_cached_tokens = old_num_tokens
+        llm.model_runner.call("prefill_only", [seq])
+        llm.scheduler.block_manager.finalize_prompt_append(seq, old_num_tokens)
+        seq.num_cached_tokens = seq.num_tokens
+        seq.clear_prompt_data()
+        self._seal_sequence(seq)
+        self._log(f"Embedded assistant suffix with {len(suffix)} vision tokens (context={int(seq.num_tokens)}).")
+        return "embedded_appended"
+
     def generate_embedded_answer(
         self,
         prompt_token_ids: list[int],

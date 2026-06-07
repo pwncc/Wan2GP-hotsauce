@@ -6,6 +6,31 @@ from shared.prompt_enhancer.qwen35_vl import _prepare_multimodal_vllm_prompt
 
 
 VISION_QA_SYSTEM_PROMPT = "Answer the user's question about the provided image accurately and concisely. If the answer is uncertain, say so."
+VISION_CONTEXT_NOTE = "This image is now loaded into the conversation for you to see directly."
+
+
+def build_image_context_prompt(caption_model: Any, processor: Any, image: Any, note: str | None = None):
+    context_note = str(note or VISION_CONTEXT_NOTE).strip()
+    if len(context_note) == 0:
+        context_note = VISION_CONTEXT_NOTE
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": context_note},
+            ],
+        }
+    ]
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    model_inputs = processor(
+        text=[text],
+        images=[image],
+        return_tensors="pt",
+        padding=True,
+        return_mm_token_type_ids=True,
+    )
+    return _prepare_multimodal_vllm_prompt(caption_model, model_inputs)
 
 
 def build_image_question_prompt(caption_model: Any, processor: Any, image: Any, question: str, system_prompt: str | None = None):
@@ -36,4 +61,4 @@ def build_image_question_prompt(caption_model: Any, processor: Any, image: Any, 
     return _prepare_multimodal_vllm_prompt(caption_model, model_inputs)
 
 
-__all__ = ["VISION_QA_SYSTEM_PROMPT", "build_image_question_prompt"]
+__all__ = ["VISION_CONTEXT_NOTE", "VISION_QA_SYSTEM_PROMPT", "build_image_context_prompt", "build_image_question_prompt"]

@@ -137,8 +137,177 @@ def _parse_linked_variant(value: Any) -> tuple[str, str] | None:
 
 
 def _get_main_callable(name: str) -> Any:
-    main_module = sys.modules.get("__main__")
-    return None if main_module is None else getattr(main_module, str(name or "").strip(), None)
+    lookup_name = str(name or "").strip()
+    if len(lookup_name) == 0:
+        return None
+    for module_name in ("__main__", "wgp"):
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        value = getattr(module, lookup_name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _is_finetune_model_def(model_def: dict[str, Any]) -> bool:
+    if not isinstance(model_def, dict):
+        return False
+    metadata = model_def.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("finetune") is True:
+        return True
+    model_path = str(model_def.get("path", "") or "").replace("\\", "/").casefold()
+    return "/finetunes/" in model_path
+
+
+def _compact_finetune_record(model_def: dict[str, Any]) -> dict[str, Any]:
+    metadata = model_def.get("metadata") if isinstance(model_def.get("metadata"), dict) else {}
+    model_type = str(metadata.get("model_type") or model_def.get("model_type") or "").strip()
+    main_output = metadata.get("main_output", [])
+    return {
+        "model_type": model_type,
+        "name": str(model_def.get("name", "") or "").strip(),
+        "description": str(model_def.get("description", "") or "").strip(),
+        "architecture": str(metadata.get("base_model_type") or model_def.get("architecture", "") or "").strip(),
+        "main_output": list(main_output) if isinstance(main_output, (list, tuple)) else [],
+        "family": str(metadata.get("family_label") or metadata.get("family") or "").strip(),
+    }
+
+
+def _finetune_search_text(record: dict[str, Any]) -> str:
+    return " ".join(
+        str(record.get(key, "") or "").strip()
+        for key in ("model_type", "name", "description", "architecture", "family")
+        if len(str(record.get(key, "") or "").strip()) > 0
+    ).casefold()
+
+
+def _list_finetune_model_defs(**filters: Any) -> list[dict[str, Any]]:
+    list_model_defs = _get_main_callable("list_model_defs")
+    if not callable(list_model_defs):
+        return []
+    try:
+        records = list_model_defs(finetune=True, **filters)
+    except Exception:
+        return []
+    return [record for record in records if isinstance(record, dict)]
+
+
+def finetune_compatible_tools(model_type: str) -> list[str]:
+    lookup_model_type = str(model_type or "").strip()
+    if len(lookup_model_type) == 0:
+        return []
+    get_default_settings = _get_main_callable("get_default_settings")
+    if not callable(get_default_settings):
+        return []
+    try:
+        defaults = get_default_settings(lookup_model_type)
+    except Exception:
+        return []
+    if not isinstance(defaults, dict):
+        return []
+    compatible: list[str] = []
+    for tool_name in GENERATION_TOOL_IDS:
+        if validate_wangp_settings_payload_for_tool(tool_name, defaults) is None:
+            compatible.append(tool_name)
+    return compatible
+
+
+def search_finetunes(
+    *,
+    query: str | None = None,
+    tool_id: str | None = None,
+    main_output: str | None = None,
+    base_model_type: str | None = None,
+) -> list[dict[str, Any]]:
+    filters: dict[str, Any] = {}
+    if main_output is not None and len(str(main_output or "").strip()) > 0:
+        filters["main_output"] = str(main_output).strip()
+    if base_model_type is not None and len(str(base_model_type or "").strip()) > 0:
+        filters["base_model_type"] = str(base_model_type).strip()
+    records = [_compact_finetune_record(record) for record in _list_finetune_model_defs(**filters)]
+    query_text = str(query or "").strip()
+    if len(query_text) > 0:
+        query_cf = query_text.casefold()
+        records = [record for record in records if query_cf in _finetune_search_text(record)]
+    lookup_tool = str(tool_id or "").strip()
+    results: list[dict[str, Any]] = []
+    for record in records:
+        compatible_tools = finetune_compatible_tools(str(record.get("model_type", "") or "").strip())
+        if len(lookup_tool) > 0 and lookup_tool not in compatible_tools:
+            continue
+        entry = dict(record)
+        entry["compatible_tools"] = compatible_tools
+        results.append(entry)
+    results.sort(key=lambda item: str(item.get("model_type", "") or "").casefold())
+    return results
+
+
+def resolve_finetune_model_type(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if len(text) == 0:
+        return None
+    get_model_def = _get_main_callable("get_model_def")
+    if callable(get_model_def):
+        model_def = get_model_def(text)
+        if isinstance(model_def, dict) and _is_finetune_model_def(model_def):
+            return text
+    matches = search_finetunes(query=text)
+    exact_model_type = [record for record in matches if str(record.get("model_type", "") or "").strip().casefold() == text.casefold()]
+    if len(exact_model_type) == 1:
+        return str(exact_model_type[0].get("model_type", "") or "").strip()
+    exact_name = [record for record in matches if str(record.get("name", "") or "").strip().casefold() == text.casefold()]
+    if len(exact_name) == 1:
+        return str(exact_name[0].get("model_type", "") or "").strip()
+    if len(matches) == 1:
+        return str(matches[0].get("model_type", "") or "").strip()
+    return None
+
+
+_TASK_PRESERVE_KEYS = (
+    "prompt",
+    "client_id",
+    "alt_prompt",
+    "audio_guide",
+    "image_start",
+    "image_end",
+    "image_refs",
+    "image_prompt_type",
+    "video_prompt_type",
+)
+
+
+def apply_model_type_to_task(tool_name: str, task: dict[str, Any], model_type: str) -> dict[str, Any]:
+    lookup_tool = str(tool_name or "").strip()
+    lookup_model_type = str(model_type or "").strip()
+    if len(lookup_model_type) == 0:
+        return dict(task or {})
+    get_model_def = _get_main_callable("get_model_def")
+    if not callable(get_model_def):
+        raise RuntimeError("WanGP get_model_def is not available.")
+    model_def = get_model_def(lookup_model_type)
+    if not isinstance(model_def, dict):
+        raise ValueError(f"Unknown model_type '{lookup_model_type}'. Call Search Finetunes first.")
+    if not _is_finetune_model_def(model_def):
+        raise ValueError(f"model_type '{lookup_model_type}' is not a finetune from finetunes/.")
+    get_default_settings = _get_main_callable("get_default_settings")
+    if not callable(get_default_settings):
+        raise RuntimeError("WanGP get_default_settings is not available.")
+    defaults = copy.deepcopy(get_default_settings(lookup_model_type))
+    if not isinstance(defaults, dict):
+        raise TypeError(f"Default settings for finetune '{lookup_model_type}' must be a JSON object.")
+    eligibility_error = validate_wangp_settings_payload_for_tool(lookup_tool, defaults)
+    if eligibility_error is not None:
+        compatible_tools = finetune_compatible_tools(lookup_model_type)
+        compatible_label = ", ".join(compatible_tools) if len(compatible_tools) > 0 else "none"
+        raise ValueError(
+            f"Finetune '{lookup_model_type}' is not compatible with tool '{lookup_tool}': {eligibility_error} Compatible tools: {compatible_label}."
+        )
+    preserved = {key: copy.deepcopy(task[key]) for key in _TASK_PRESERVE_KEYS if isinstance(task, dict) and key in task}
+    merged = copy.deepcopy(defaults)
+    merged.update(preserved)
+    merged["model_type"] = lookup_model_type
+    return merged
 
 
 def _get_base_model_type_name(model_type: Any) -> str:
@@ -399,11 +568,21 @@ def _resolve_tool_lora_dir(tool_name: str, variant: str) -> tuple[str, Path]:
     return model_type, Path(get_lora_dir(model_type))
 
 
-def _list_tool_lora_entries(tool_name: str, variant: str) -> list[tuple[str, str]]:
+def _resolve_task_lora_dir(task: dict[str, Any], tool_name: str, variant: str) -> tuple[str, Path]:
+    model_type = str((task or {}).get("model_type", "") or "").strip()
+    if len(model_type) > 0:
+        get_lora_dir = _get_main_callable("get_lora_dir")
+        if not callable(get_lora_dir):
+            raise RuntimeError("WanGP get_lora_dir(model_type) is not available.")
+        return model_type, Path(get_lora_dir(model_type))
+    return _resolve_tool_lora_dir(tool_name, variant)
+
+
+def _list_tool_lora_entries(tool_name: str, variant: str, task: dict[str, Any] | None = None) -> list[tuple[str, str]]:
     lookup_name = str(tool_name or "").strip()
     if lookup_name not in GENERATION_TOOL_IDS:
         raise ValueError(f"LoRAs are only available for the 6 generation tools: {', '.join(GENERATION_TOOL_IDS)}.")
-    _model_type, lora_dir = _resolve_tool_lora_dir(lookup_name, variant)
+    _model_type, lora_dir = _resolve_task_lora_dir(task or {}, lookup_name, variant)
     if not lora_dir.is_dir():
         return []
     url_cache = _read_loras_url_cache()
@@ -619,16 +798,16 @@ def refresh_tool_presets() -> None:
     _LIVE_FILE_PRESET_CACHE.clear()
 
 
-def list_tool_loras(tool_name: str, variant: str) -> list[str]:
-    return [filename for filename, _original_entry in _list_tool_lora_entries(tool_name, variant)]
+def list_tool_loras(tool_name: str, variant: str, task: dict[str, Any] | None = None) -> list[str]:
+    return [filename for filename, _original_entry in _list_tool_lora_entries(tool_name, variant, task=task)]
 
 
-def normalize_tool_loras(tool_name: str, variant: str, loras: Any) -> tuple[list[str], str]:
+def normalize_tool_loras(tool_name: str, variant: str, loras: Any, task: dict[str, Any] | None = None) -> tuple[list[str], str]:
     if loras is None:
         return [], ""
     if not isinstance(loras, list):
         raise TypeError("loras must be an array of objects.")
-    available_loras = _list_tool_lora_entries(tool_name, variant)
+    available_loras = _list_tool_lora_entries(tool_name, variant, task=task)
     available_by_key = {_basename_lora_key(filename): (filename, original_entry) for filename, original_entry in available_loras}
     normalized_loras = []
     multiplier_tokens = []
@@ -659,7 +838,7 @@ def normalize_tool_loras(tool_name: str, variant: str, loras: Any) -> tuple[list
 
 
 def apply_tool_loras(tool_name: str, variant: str, task: dict[str, Any], loras: Any) -> dict[str, Any]:
-    normalized_loras, normalized_multipliers = normalize_tool_loras(tool_name, variant, loras)
+    normalized_loras, normalized_multipliers = normalize_tool_loras(tool_name, variant, loras, task=task)
     if len(normalized_loras) == 0:
         return task
     existing_loras = [str(value).strip() for value in list(task.get("activated_loras", []) or []) if len(str(value).strip()) > 0]
@@ -753,6 +932,7 @@ def build_generation_task(
 
 __all__ = [
     "GENERATION_TOOL_IDS",
+    "apply_model_type_to_task",
     "apply_tool_loras",
     "DEFAULT_IMAGE_EDITOR_VARIANT",
     "TOOL_DISPLAY_NAMES",
@@ -761,6 +941,7 @@ __all__ = [
     "build_linked_tool_variant",
     "clone_tool_preset",
     "find_tool_variant",
+    "finetune_compatible_tools",
     "get_default_image_editor_variant",
     "get_default_image_generator_variant",
     "get_default_speech_from_description_variant",
@@ -776,8 +957,10 @@ __all__ = [
     "normalize_tool_loras",
     "load_tool_preset",
     "refresh_tool_presets",
+    "resolve_finetune_model_type",
     "resolve_tool_variant",
     "resolve_wangp_settings_file",
+    "search_finetunes",
     "validate_wangp_settings_for_tool",
     "validate_wangp_settings_payload_for_tool",
 ]

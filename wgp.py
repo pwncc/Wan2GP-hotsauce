@@ -1683,6 +1683,33 @@ def _build_runtime_task(task_id_val, params, plugin_data=None):
     }
 
 
+_MEDIA_OUTPUT_ELEM_IDS = frozenset({
+    "gallery",
+    "audio_gallery_state_paths",
+    "audio_gallery_state_selected",
+    "audio_gallery_html",
+    "audio_gallery_refresh_trigger",
+    "audio_gallery_click_data",
+    "audio_gallery_click_trigger",
+})
+
+
+def _is_media_output_component(component) -> bool:
+    """True for Gradio widgets that display generated media, not user upload inputs."""
+    if component is None or isinstance(component, (str, int, float, bool)):
+        return False
+    if isinstance(component, dict):
+        return False
+    elem_id = getattr(component, "elem_id", None)
+    if elem_id in _MEDIA_OUTPUT_ELEM_IDS:
+        return True
+    if isinstance(component, gr.Gallery):
+        return getattr(component, "interactive", True) is False
+    if isinstance(component, (gr.Video, gr.Audio, gr.Image)):
+        return getattr(component, "interactive", True) is False
+    return False
+
+
 def _is_edit_task_params(params):
     return isinstance(params, dict) and str(params.get("mode", "") or "").startswith("edit_")
 
@@ -12682,7 +12709,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                     outputs= [prompt],
                     show_progress="hidden",
                 ).then(fn=save_inputs,
-                    inputs =[target_state] + gen_inputs,
+                    inputs =[target_state] + model_switch_inputs,
                     outputs= None,
                     show_progress="hidden",
                 ).then(fn=goto_model_type, inputs =[state, model_choice_target] , outputs= [model_family, model_base_type_choice, model_choice, refresh_form_trigger],

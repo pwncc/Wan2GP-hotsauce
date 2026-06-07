@@ -38,6 +38,7 @@ from .ltx_core.text_encoders.gemma.feature_extractor import GemmaFeaturesExtract
 from .ltx_core.model.video_vae import SpatialTilingConfig, TemporalTilingConfig, TilingConfig
 from .ltx_core.types import AudioLatentShape, VideoPixelShape
 from .lora_utils import is_ic_lora_filename, phase2_ic_lora_name
+from .ltx2_handler import ltx2_auto_distilled_lora_enabled
 from .ltx_pipelines.distilled import DistilledPipeline
 from .ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
 from .ltx_pipelines.utils.constants import AUDIO_SAMPLE_RATE, DEFAULT_NEGATIVE_PROMPT
@@ -927,7 +928,11 @@ class LTX2:
             loras.append(url)
             loras_mult.append(multiplier)
 
-        if pipeline_kind != "distilled" and (guidance_phases > 1 or sample_solver in {"distilled_8_steps", "res2s"}):
+        if (
+            pipeline_kind != "distilled"
+            and ltx2_auto_distilled_lora_enabled(model_def)
+            and (guidance_phases > 1 or sample_solver in {"distilled_8_steps", "res2s"})
+        ):
             use_hq_sampler = sample_solver == "res2s"
             use_distilled_8_steps = sample_solver == "distilled_8_steps"
             use_id_lora = "1" in audio_prompt_type

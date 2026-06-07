@@ -13,6 +13,7 @@ import gradio as gr
 
 from shared.gradio.local_file_picker import CHECKPOINT_FILE_EXTENSIONS, LocalFilePickerTextbox
 from shared.utils import files_locator as fl
+from models.ltx2.ltx2_handler import LTX2_AUTO_DISTILLED_LORA_KEY, ltx2_auto_distilled_lora_enabled
 
 
 FINETUNES_DIR = "finetunes"
@@ -72,6 +73,8 @@ class FinetuneEditorUI:
     custom_url_2_text: gr.Textbox
     custom_url_3_group: gr.Column
     custom_url_3_text: gr.Textbox
+    ltx2_auto_distilled_lora_group: gr.Column
+    ltx2_auto_distilled_lora: gr.Checkbox
     infos_editor: gr.Textbox
     prompt_infos_editor: gr.Textbox
     enhancer_system_1_group: gr.Column
@@ -164,6 +167,12 @@ def create_editor() -> FinetuneEditorUI:
                                 custom_url_2_text = LocalFilePickerTextbox(label="custom_url_2", file_extensions=CHECKPOINT_FILE_EXTENSIONS, multiselect=False, popup_title="Select Local Checkpoint File").mount()
                             with gr.Column(visible=False, elem_classes=["wangp-finetune-editor-field-group"]) as custom_url_3_group:
                                 custom_url_3_text = LocalFilePickerTextbox(label="custom_url_3", file_extensions=CHECKPOINT_FILE_EXTENSIONS, multiselect=False, popup_title="Select Local Checkpoint File").mount()
+                            with gr.Column(visible=False, elem_classes=["wangp-finetune-editor-field-group"]) as ltx2_auto_distilled_lora_group:
+                                ltx2_auto_distilled_lora = gr.Checkbox(
+                                    label="Auto-include Distilled LoRA",
+                                    value=True,
+                                    info="When enabled, WanGP automatically adds the system distilled LoRA for two-stage LTX-2 sampling. Disable for finetunes that should never load a distil LoRA.",
+                                )
                         with gr.Tab("Help"):
                             infos_editor = _markdown_editor("Model Infos")
                             prompt_infos_editor = _markdown_editor("Prompt Help")
@@ -226,6 +235,8 @@ def create_editor() -> FinetuneEditorUI:
         custom_url_2_text=custom_url_2_text,
         custom_url_3_group=custom_url_3_group,
         custom_url_3_text=custom_url_3_text,
+        ltx2_auto_distilled_lora_group=ltx2_auto_distilled_lora_group,
+        ltx2_auto_distilled_lora=ltx2_auto_distilled_lora,
         infos_editor=infos_editor,
         prompt_infos_editor=prompt_infos_editor,
         enhancer_system_1_group=enhancer_system_1_group,
@@ -436,6 +447,8 @@ def _open_outputs(ui: FinetuneEditorUI) -> list:
         ui.custom_url_2_text,
         ui.custom_url_3_group,
         ui.custom_url_3_text,
+        ui.ltx2_auto_distilled_lora_group,
+        ui.ltx2_auto_distilled_lora,
         ui.infos_editor,
         ui.prompt_infos_editor,
         ui.enhancer_system_1_group,
@@ -511,6 +524,7 @@ def _save_inputs(ui: FinetuneEditorUI, state) -> list:
         ui.custom_url_1_text,
         ui.custom_url_2_text,
         ui.custom_url_3_text,
+        ui.ltx2_auto_distilled_lora,
         ui.infos_editor,
         ui.prompt_infos_editor,
         ui.enhancer_system_1_editor,
@@ -556,6 +570,7 @@ def open_editor(deps: FinetuneEditorDeps, state, source_model_type_override=None
     source_model = raw_source.get("model", {})
     id_value = original_id if editor_mode else _unique_model_id(deps, _auto_model_id(source_model_type, model_for_values.get("name", ""), source_model.get("name", "")))
     custom_updates = _custom_url_component_updates(deps, source_model_type, model_for_values)
+    ltx2_auto_distilled_lora_updates = _ltx2_auto_distilled_lora_component_updates(deps, source_model_type, model_for_values)
     enhancer_updates = _prompt_enhancer_component_updates(deps, source_model_type, model_for_values)
     current_source_choice = _creator_current_choice(deps, source_model_type)
     return (
@@ -579,6 +594,7 @@ def open_editor(deps: FinetuneEditorDeps, state, source_model_type_override=None
         gr.update(visible="text_encoder_URLs" in editable_fields),
         field_values["text_encoder_URLs"],
         *custom_updates,
+        *ltx2_auto_distilled_lora_updates,
         _format_help_value(model_for_values.get("infos", "")),
         _format_help_value(model_for_values.get("prompt_infos", "")),
         *enhancer_updates,
@@ -590,7 +606,7 @@ def open_editor(deps: FinetuneEditorDeps, state, source_model_type_override=None
     )
 
 
-def save_finetune(deps: FinetuneEditorDeps, state, mode, original_id, source_model_type, creator_source_mode, import_file, id_text, auto_id, name, description, urls, urls2, text_encoder_urls, custom_url_1, custom_url_2, custom_url_3, infos, prompt_infos, enhancer_system_1, enhancer_system_1_tokens, enhancer_system_2, enhancer_system_2_tokens, enhancer_system_3, enhancer_system_3_tokens, use_current_settings, create_new=False, create_new_output_count=0, skip_redirect_save=False):
+def save_finetune(deps: FinetuneEditorDeps, state, mode, original_id, source_model_type, creator_source_mode, import_file, id_text, auto_id, name, description, urls, urls2, text_encoder_urls, custom_url_1, custom_url_2, custom_url_3, ltx2_auto_distilled_lora_value, infos, prompt_infos, enhancer_system_1, enhancer_system_1_tokens, enhancer_system_2, enhancer_system_2_tokens, enhancer_system_3, enhancer_system_3_tokens, use_current_settings, create_new=False, create_new_output_count=0, skip_redirect_save=False):
     mode = "editor" if str(mode or "") == "editor" else "creator"
     original_id = str(original_id or "").strip()
     source_model_type = str(source_model_type or "").strip()
@@ -634,8 +650,9 @@ def save_finetune(deps: FinetuneEditorDeps, state, mode, original_id, source_mod
     settings_to_copy = _settings_to_copy(deps, state, _settings_source_model_type(mode, original_id, source_model_type)) if use_current_settings else None
     enhancer_specs = _prompt_enhancer_system_specs(deps, source_model_type)
     enhancer_values = [(enhancer_system_1, enhancer_system_1_tokens), (enhancer_system_2, enhancer_system_2_tokens), (enhancer_system_3, enhancer_system_3_tokens)]
-    raw_output = _build_finetune_json(mode, source_model_type, raw_source, raw_existing, name, description, editable_fields, values, custom_values, infos, prompt_infos, enhancer_specs, enhancer_values, settings_to_copy)
-    url_fields_changed = mode == "editor" and _url_fields_changed((raw_existing or {}).get("model", {}), raw_output.get("model", {}), [*FINETUNE_URL_FIELDS, *custom_values.keys()])
+    supports_ltx2_auto_distilled_lora = _supports_ltx2_auto_distilled_lora_setting(deps, source_model_type)
+    raw_output = _build_finetune_json(mode, source_model_type, raw_source, raw_existing, name, description, editable_fields, values, custom_values, supports_ltx2_auto_distilled_lora, ltx2_auto_distilled_lora_value, infos, prompt_infos, enhancer_specs, enhancer_values, settings_to_copy)
+    url_fields_changed = mode == "editor" and _finetune_model_fields_changed((raw_existing or {}).get("model", {}), raw_output.get("model", {}), deps, source_model_type, [*FINETUNE_URL_FIELDS, *custom_values.keys()])
     old_path = _finetune_json_path(original_id) if mode == "editor" else None
     new_path = _finetune_json_path(model_id)
     os.makedirs(FINETUNES_DIR, exist_ok=True)
@@ -782,6 +799,43 @@ def _custom_url_component_updates(deps: FinetuneEditorDeps, source_model_type: s
 def _custom_url_values(deps: FinetuneEditorDeps, source_model_type: str, values: list[str]) -> dict[str, str]:
     keys = _custom_url_keys(deps, source_model_type)
     return {key: fl.compress_path(str(values[index] or "").strip()) for index, key in enumerate(keys)}
+
+
+def _supports_ltx2_auto_distilled_lora_setting(deps: FinetuneEditorDeps, source_model_type: str) -> bool:
+    model_def = deps.get_model_def(source_model_type) or {}
+    if model_def.get("ltx2_pipeline") == "distilled":
+        return False
+    custom_urls = model_def.get("finetune_custom_urls", [])
+    if isinstance(custom_urls, str):
+        custom_urls = [custom_urls]
+    if "ltx2_lora_distilled" in custom_urls:
+        return True
+    return str(model_def.get("architecture", "")).startswith("ltx2")
+
+
+def _ltx2_auto_distilled_lora_component_updates(deps: FinetuneEditorDeps, source_model_type: str, model_for_values: dict):
+    supported = _supports_ltx2_auto_distilled_lora_setting(deps, source_model_type)
+    return (
+        gr.update(visible=supported),
+        gr.update(value=ltx2_auto_distilled_lora_enabled(model_for_values) if supported else True),
+    )
+
+
+def _set_optional_ltx2_auto_distilled_lora(model_section: dict, supported: bool, enabled: bool) -> None:
+    if not supported:
+        return
+    if enabled:
+        model_section.pop(LTX2_AUTO_DISTILLED_LORA_KEY, None)
+    else:
+        model_section[LTX2_AUTO_DISTILLED_LORA_KEY] = False
+
+
+def _finetune_model_fields_changed(before_model: dict, after_model: dict, deps: FinetuneEditorDeps, source_model_type: str, url_keys) -> bool:
+    if _url_fields_changed(before_model, after_model, url_keys):
+        return True
+    if _supports_ltx2_auto_distilled_lora_setting(deps, source_model_type):
+        return ltx2_auto_distilled_lora_enabled(before_model) != ltx2_auto_distilled_lora_enabled(after_model)
+    return False
 
 
 def _prompt_enhancer_component_updates(deps: FinetuneEditorDeps, source_model_type: str, model_values: dict):
@@ -1046,7 +1100,7 @@ def _settings_to_copy(deps: FinetuneEditorDeps, state, model_type: str) -> dict:
     return settings
 
 
-def _build_finetune_json(mode, source_model_type, raw_source, raw_existing, name, description, editable_fields, values, custom_values, infos, prompt_infos, enhancer_specs, enhancer_values, settings_to_copy):
+def _build_finetune_json(mode, source_model_type, raw_source, raw_existing, name, description, editable_fields, values, custom_values, supports_ltx2_auto_distilled_lora, ltx2_auto_distilled_lora_value, infos, prompt_infos, enhancer_specs, enhancer_values, settings_to_copy):
     raw_output = copy.deepcopy(raw_existing if mode == "editor" and raw_existing else raw_source)
     model_section = copy.deepcopy(raw_output.get("model", {}))
     if mode != "editor" and not model_section.get("architecture"):
@@ -1062,6 +1116,7 @@ def _build_finetune_json(mode, source_model_type, raw_source, raw_existing, name
             model_section[key] = value
         else:
             model_section.pop(key, None)
+    _set_optional_ltx2_auto_distilled_lora(model_section, supports_ltx2_auto_distilled_lora, bool(ltx2_auto_distilled_lora_value))
     _set_optional_markdown(model_section, "infos", infos)
     _set_optional_markdown(model_section, "prompt_infos", prompt_infos)
     _set_optional_prompt_enhancer_systems(model_section, enhancer_specs, enhancer_values)

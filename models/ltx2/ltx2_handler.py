@@ -37,6 +37,18 @@ _SYSTEM_LORA_SPEC_KEYS = {
     "outpaint": "outpaint_lora",
     "hdr": "hdr_lora",
 }
+LTX2_AUTO_DISTILLED_LORA_KEY = "ltx2_auto_distilled_lora"
+
+
+def ltx2_auto_distilled_lora_enabled(model_def) -> bool:
+    if not isinstance(model_def, dict):
+        return True
+    value = model_def.get(LTX2_AUTO_DISTILLED_LORA_KEY, True)
+    if isinstance(value, str):
+        return value.strip().casefold() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
 _EDITANYTHING_MODEL_DEF = {
     "ltx2_edit_anything": True,
     "ltx2_edit_anything_ref": True,

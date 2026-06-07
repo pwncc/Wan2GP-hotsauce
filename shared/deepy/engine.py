@@ -101,6 +101,11 @@ _EXTRA_SETTINGS_PARAMETER = {
     "description": "Optional dict of additional exposed UI settings. Call Get Default Settings first and copy one of its extra_settings keys exactly, for example {\"Guidance\": 7.5}.",
     "required": False,
 }
+_MODEL_TYPE_PARAMETER = {
+    "type": "string",
+    "description": "Optional finetune model_type from Search Finetunes. Overrides the configured template model for this call only.",
+    "required": False,
+}
 
 
 def set_assistant_debug(enabled: bool) -> None:
@@ -400,6 +405,7 @@ class AssistantSessionState:
     reset_base_signature: str = ""
     reset_base_context_window_tokens: int = 0
     reset_to_base_callback: Callable[[], bool] | None = None
+    visual_context_media_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -464,6 +470,7 @@ def clear_assistant_session(session: AssistantSessionState) -> None:
     session.reset_base_signature = ""
     session.reset_base_context_window_tokens = 0
     session.reset_to_base_callback = None
+    session.visual_context_media_ids = []
     assistant_chat.reset_session_chat(session)
 
 
@@ -1299,7 +1306,7 @@ class tools:
             task["custom_settings"] = custom_settings
         return task, None
 
-    def _get_effective_generation_defaults(self, tool_name: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    def _get_effective_generation_defaults(self, tool_name: str, model_type: str | None = None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         lookup_name = str(tool_name or "").strip()
         if lookup_name not in deepy_tool_settings.GENERATION_TOOL_IDS:
             return None, {
@@ -1317,6 +1324,24 @@ class tools:
                 "template": generator_variant,
                 "error": str(exc),
             }
+        if model_type is not None and len(str(model_type or "").strip()) > 0:
+            try:
+                resolved_model_type = deepy_tool_settings.resolve_finetune_model_type(model_type)
+                if resolved_model_type is None:
+                    return None, {
+                        "status": "error",
+                        "tool_id": lookup_name,
+                        "template": generator_variant,
+                        "error": f"Unknown finetune '{model_type}'. Call Search Finetunes first.",
+                    }
+                task = deepy_tool_settings.apply_model_type_to_task(lookup_name, task, resolved_model_type)
+            except Exception as exc:
+                return None, {
+                    "status": "error",
+                    "tool_id": lookup_name,
+                    "template": generator_variant,
+                    "error": str(exc),
+                }
         include_num_frames = self._is_video_generation_tool(lookup_name)
         task, error_result = self._apply_generation_overrides(lookup_name, task, include_num_frames=include_num_frames)
         if error_result is not None:
@@ -1325,6 +1350,8 @@ class tools:
             return None, error_result
         model_def = self._get_effective_tool_model_def(lookup_name)
         audio_only = bool(model_def.get("audio_only", False))
+        model_type = str(task.get("model_type", "") or task.get("base_model_type", "") or "").strip()
+        model_path = str(model_def.get("path", "") or "").replace("\\", "/").casefold()
         width = height = None
         if not audio_only:
             width, height = self._parse_generation_resolution(task.get("resolution", ""))
@@ -1337,6 +1364,9 @@ class tools:
             "status": "ok",
             "tool_id": lookup_name,
             "template": generator_variant,
+            "model_type": model_type or None,
+            "model_name": str(model_def.get("name", "") or "").strip() or None,
+            "is_finetune": "/finetunes/" in model_path,
             "width": width,
             "height": height,
             "seed": seed,
@@ -1442,7 +1472,16 @@ class tools:
             task["num_inference_steps"] = int(num_inference_steps)
         return self._apply_extra_settings_overrides(tool_name, task, extra_settings)
 
-    def _build_generation_task(self, tool_name: str, variant: str, *, prompt: str, client_id: str, **kwargs) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    def _build_generation_task(
+        self,
+        tool_name: str,
+        variant: str,
+        *,
+        prompt: str,
+        client_id: str,
+        model_type: str | None = None,
+        **kwargs,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         self._remember_generated_client_id(client_id)
         try:
             task = deepy_tool_settings.build_generation_task(tool_name, variant, prompt=prompt, client_id=client_id, **kwargs)
@@ -1454,6 +1493,26 @@ class tools:
                 "prompt": str(prompt or "").strip(),
                 "error": str(exc),
             }
+        if model_type is not None and len(str(model_type or "").strip()) > 0:
+            try:
+                resolved_model_type = deepy_tool_settings.resolve_finetune_model_type(model_type)
+                if resolved_model_type is None:
+                    return None, {
+                        "status": "error",
+                        "client_id": client_id,
+                        "output_file": "",
+                        "prompt": str(prompt or "").strip(),
+                        "error": f"Unknown finetune '{model_type}'. Call Search Finetunes first.",
+                    }
+                task = deepy_tool_settings.apply_model_type_to_task(tool_name, task, resolved_model_type)
+            except Exception as exc:
+                return None, {
+                    "status": "error",
+                    "client_id": client_id,
+                    "output_file": "",
+                    "prompt": str(prompt or "").strip(),
+                    "error": str(exc),
+                }
         return task, None
 
     def _sync_recent_media(self, max_items: int = 5) -> None:
@@ -2237,6 +2296,69 @@ class tools:
                 return result
 
     @assistant_tool(
+        display_name="Search Finetunes",
+        description="Search WanGP finetune models defined in the finetunes/ folder. Returns model_type values that can be passed to generation tools or Get Default Settings.",
+        parameters={
+            "query": {
+                "type": "string",
+                "description": "Optional text to match against finetune model_type, name, description, architecture, or family.",
+                "required": False,
+            },
+            "tool_id": {
+                "type": "string",
+                "description": "Optional generation tool id. When provided, only finetunes compatible with that tool are returned.",
+                "enum": list(deepy_tool_settings.GENERATION_TOOL_IDS),
+                "required": False,
+            },
+            "main_output": {
+                "type": "string",
+                "description": "Optional output filter such as video, image, or audio.",
+                "required": False,
+            },
+            "base_model_type": {
+                "type": "string",
+                "description": "Optional base architecture id filter, for example ltx2_22B or i2v_2_2.",
+                "required": False,
+            },
+        },
+        pause_runtime=False,
+    )
+    def search_finetunes(
+        self,
+        query: str | None = None,
+        tool_id: str | None = None,
+        main_output: str | None = None,
+        base_model_type: str | None = None,
+    ) -> dict[str, Any]:
+        lookup_tool = str(tool_id or "").strip()
+        if len(lookup_tool) > 0 and lookup_tool not in deepy_tool_settings.GENERATION_TOOL_IDS:
+            return {
+                "status": "error",
+                "finetunes": [],
+                "count": 0,
+                "error": f"tool_id must be one of: {', '.join(deepy_tool_settings.GENERATION_TOOL_IDS)}.",
+            }
+        try:
+            finetunes = deepy_tool_settings.search_finetunes(
+                query=query,
+                tool_id=lookup_tool or None,
+                main_output=main_output,
+                base_model_type=base_model_type,
+            )
+        except Exception as exc:
+            return {
+                "status": "error",
+                "finetunes": [],
+                "count": 0,
+                "error": str(exc),
+            }
+        return {
+            "status": "ok",
+            "finetunes": finetunes,
+            "count": len(finetunes),
+        }
+
+    @assistant_tool(
         display_name="Get Loras",
         description="List the available LoRA filenames for one of Deepy's 6 generation tools.",
         parameters={
@@ -2245,10 +2367,11 @@ class tools:
                 "description": "Generation tool id: gen_image, edit_image, gen_video, gen_video_with_speech, gen_speech_from_description, or gen_speech_from_sample.",
                 "enum": list(deepy_tool_settings.GENERATION_TOOL_IDS),
             },
+            "model_type": copy.deepcopy(_MODEL_TYPE_PARAMETER),
         },
         pause_runtime=False,
     )
-    def get_loras(self, tool_id: str) -> dict[str, Any]:
+    def get_loras(self, tool_id: str, model_type: str | None = None) -> dict[str, Any]:
         lookup_name = str(tool_id or "").strip()
         if lookup_name not in deepy_tool_settings.GENERATION_TOOL_IDS:
             return {
@@ -2260,8 +2383,37 @@ class tools:
             }
         generator_variant = self.get_tool_variant(lookup_name)
         template_file = self.get_tool_template_filename(lookup_name)
+        lora_task: dict[str, Any] | None = None
+        if model_type is not None and len(str(model_type or "").strip()) > 0:
+            try:
+                resolved_model_type = deepy_tool_settings.resolve_finetune_model_type(model_type)
+                if resolved_model_type is None:
+                    return {
+                        "status": "error",
+                        "tool_id": lookup_name,
+                        "generator_variant": generator_variant,
+                        "template_file": template_file,
+                        "loras": [],
+                        "count": 0,
+                        "error": f"Unknown finetune '{model_type}'. Call Search Finetunes first.",
+                    }
+                lora_task = deepy_tool_settings.apply_model_type_to_task(
+                    lookup_name,
+                    {"prompt": "", "client_id": "__deepy_loras__"},
+                    resolved_model_type,
+                )
+            except Exception as exc:
+                return {
+                    "status": "error",
+                    "tool_id": lookup_name,
+                    "generator_variant": generator_variant,
+                    "template_file": template_file,
+                    "loras": [],
+                    "count": 0,
+                    "error": str(exc),
+                }
         try:
-            loras = deepy_tool_settings.list_tool_loras(lookup_name, generator_variant)
+            loras = deepy_tool_settings.list_tool_loras(lookup_name, generator_variant, task=lora_task)
         except Exception as exc:
             return {
                 "status": "error",
@@ -2272,7 +2424,7 @@ class tools:
                 "count": 0,
                 "error": str(exc),
             }
-        return {
+        result = {
             "status": "ok",
             "tool_id": lookup_name,
             "generator_variant": generator_variant,
@@ -2280,21 +2432,25 @@ class tools:
             "loras": loras,
             "count": len(loras),
         }
+        if isinstance(lora_task, dict):
+            result["model_type"] = str(lora_task.get("model_type", "") or "").strip() or None
+        return result
 
     @assistant_tool(
         display_name="Get Default Settings",
-        description="Return the effective default generation settings for one of Deepy's 6 generation tools: the values that WanGP will use if those settings are omitted during generation, including any currently exposed extra_settings keys.",
+        description="Return the effective default generation settings for one of Deepy's 6 generation tools: the values that WanGP will use if those settings are omitted during generation, including the active template, model_type, and any currently exposed extra_settings keys. Pass model_type to preview a finetune from Search Finetunes.",
         parameters={
             "tool_id": {
                 "type": "string",
                 "description": "Generation tool id: gen_image, edit_image, gen_video, gen_video_with_speech, gen_speech_from_description, or gen_speech_from_sample.",
                 "enum": list(deepy_tool_settings.GENERATION_TOOL_IDS),
             },
+            "model_type": copy.deepcopy(_MODEL_TYPE_PARAMETER),
         },
         pause_runtime=False,
     )
-    def get_default_settings(self, tool_id: str) -> dict[str, Any]:
-        result, error_result = self._get_effective_generation_defaults(tool_id)
+    def get_default_settings(self, tool_id: str, model_type: str | None = None) -> dict[str, Any]:
+        result, error_result = self._get_effective_generation_defaults(tool_id, model_type=model_type)
         return result if error_result is None else error_result
 
     @assistant_tool(
@@ -2320,14 +2476,23 @@ class tools:
                 "description": "Optional number of inference steps. If omitted, keep the template step count.",
                 "required": False,
             },
+            "model_type": copy.deepcopy(_MODEL_TYPE_PARAMETER),
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
         },
     )
-    def gen_image(self, prompt: str, width: int | None = None, height: int | None = None, num_inference_steps: int | None = None, extra_settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    def gen_image(
+        self,
+        prompt: str,
+        width: int | None = None,
+        height: int | None = None,
+        num_inference_steps: int | None = None,
+        model_type: str | None = None,
+        extra_settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         client_id = _next_ai_client_id()
         generator_variant = self._get_tool_ui_settings()["image_generator_variant"]
         template_file = self.get_tool_template_filename("gen_image")
-        task, error_result = self._build_generation_task("gen_image", generator_variant, prompt=prompt, client_id=client_id)
+        task, error_result = self._build_generation_task("gen_image", generator_variant, prompt=prompt, client_id=client_id, model_type=model_type)
         if error_result is not None:
             error_result["generator_variant"] = generator_variant
             if len(template_file) > 0:
@@ -2403,6 +2568,7 @@ class tools:
                 "description": "Optional number of inference steps. If omitted, keep the template step count.",
                 "required": False,
             },
+            "model_type": copy.deepcopy(_MODEL_TYPE_PARAMETER),
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
             "loras": {
                 "type": "array",
@@ -2430,6 +2596,7 @@ class tools:
         duration_seconds: float | None = None,
         fps: int | None = None,
         num_inference_steps: int | None = None,
+        model_type: str | None = None,
         extra_settings: dict[str, Any] | None = None,
         loras: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -2450,6 +2617,7 @@ class tools:
             generator_variant,
             prompt=prompt,
             client_id=client_id,
+            model_type=model_type,
             image_start=None if start_media is None else str(start_media.get("path", "")).strip(),
             image_end=None if end_media is None else str(end_media.get("path", "")).strip(),
         )
@@ -2557,6 +2725,7 @@ class tools:
                 "description": "Optional number of inference steps. If omitted, keep the template step count.",
                 "required": False,
             },
+            "model_type": copy.deepcopy(_MODEL_TYPE_PARAMETER),
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
             "loras": {
                 "type": "array",
@@ -2584,6 +2753,7 @@ class tools:
         duration_seconds: float | None = None,
         fps: int | None = None,
         num_inference_steps: int | None = None,
+        model_type: str | None = None,
         extra_settings: dict[str, Any] | None = None,
         loras: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -2604,6 +2774,7 @@ class tools:
             generator_variant,
             prompt=prompt,
             client_id=client_id,
+            model_type=model_type,
             audio_guide=str(audio_media.get("path", "")).strip(),
             image_start_target=self._get_image_start_target("gen_video_with_speech"),
             image_start=str(start_media.get("path", "")).strip(),
@@ -2683,14 +2854,28 @@ class tools:
                 "type": "string",
                 "description": "A short description of the desired voice, tone, or speaking style.",
             },
+            "model_type": copy.deepcopy(_MODEL_TYPE_PARAMETER),
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
         },
     )
-    def gen_speech_from_description(self, prompt: str, voice_description: str, extra_settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    def gen_speech_from_description(
+        self,
+        prompt: str,
+        voice_description: str,
+        model_type: str | None = None,
+        extra_settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         client_id = _next_ai_client_id()
         generator_variant = self.get_tool_variant("gen_speech_from_description")
         template_file = self.get_tool_template_filename("gen_speech_from_description")
-        task, error_result = self._build_generation_task("gen_speech_from_description", generator_variant, prompt=prompt, client_id=client_id, alt_prompt=voice_description)
+        task, error_result = self._build_generation_task(
+            "gen_speech_from_description",
+            generator_variant,
+            prompt=prompt,
+            client_id=client_id,
+            model_type=model_type,
+            alt_prompt=voice_description,
+        )
         if error_result is not None:
             error_result["generator_variant"] = generator_variant
             if len(template_file) > 0:
@@ -2739,10 +2924,17 @@ class tools:
                 "type": "string",
                 "description": "The media id of the audio sample returned by Resolve Media.",
             },
+            "model_type": copy.deepcopy(_MODEL_TYPE_PARAMETER),
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
         },
     )
-    def gen_speech_from_sample(self, prompt: str, media_id: str, extra_settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    def gen_speech_from_sample(
+        self,
+        prompt: str,
+        media_id: str,
+        model_type: str | None = None,
+        extra_settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         self._sync_recent_media()
         sample_media, error_result = self._resolve_audio_media(media_id, "media_id")
         if error_result is not None:
@@ -2756,6 +2948,7 @@ class tools:
             generator_variant,
             prompt=prompt,
             client_id=client_id,
+            model_type=model_type,
             audio_guide=str(sample_media.get("path", "")).strip(),
         )
         if error_result is not None:
@@ -2823,6 +3016,7 @@ class tools:
                 "description": "Optional number of inference steps. If omitted, keep the template step count.",
                 "required": False,
             },
+            "model_type": copy.deepcopy(_MODEL_TYPE_PARAMETER),
             "extra_settings": copy.deepcopy(_EXTRA_SETTINGS_PARAMETER),
         },
     )
@@ -2833,6 +3027,7 @@ class tools:
         width: int | None = None,
         height: int | None = None,
         num_inference_steps: int | None = None,
+        model_type: str | None = None,
         extra_settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._sync_recent_media()
@@ -2858,6 +3053,7 @@ class tools:
             editor_variant,
             prompt=prompt,
             client_id=client_id,
+            model_type=model_type,
             image_refs=[str(media_record.get("path", "")).strip()],
         )
         if error_result is not None:
@@ -4074,7 +4270,7 @@ class tools:
 
     @assistant_tool(
         display_name="Inspect Media",
-        description="Ask Deepy to inspect a previously resolved image or a frame from a previously resolved video and answer a visual question about it.",
+        description="Load a previously resolved image, or a frame from a video, directly into Deepy's visual context so you can see it yourself. Optional question text becomes a short note attached to the image, not a separate captioning step.",
         parameters={
             "media_id": {
                 "type": "string",
@@ -4082,7 +4278,8 @@ class tools:
             },
             "question": {
                 "type": "string",
-                "description": "The visual question to answer about that media item.",
+                "description": "Optional short note about what to focus on in the image. Omit when you just need the media loaded into visual context.",
+                "required": False,
             },
             "frame_no": {
                 "type": "integer",
@@ -4090,10 +4287,9 @@ class tools:
                 "required": False,
             },
         },
-        pause_runtime=True,
-        pause_reason="vision",
+        pause_runtime=False,
     )
-    def inspect_media(self, media_id: str, question: str, frame_no: int | None = None) -> dict[str, Any]:
+    def inspect_media(self, media_id: str, question: str | None = None, frame_no: int | None = None) -> dict[str, Any]:
         self._sync_recent_media()
         try:
             frame_no = None if frame_no is None or str(frame_no).strip() == "" else int(frame_no)
@@ -5089,62 +5285,123 @@ class AssistantEngine:
             raise RuntimeError("Deepy vision runtime is not available.")
         return caption_model, caption_processor
 
-    def _run_visual_query(self, media_record: dict[str, Any], question: str, frame_no: int | None = None) -> dict[str, Any]:
-        if not self._gpu_acquired:
-            self.runtime_hooks.clear_gpu_resident()
-            self.session.release_vram_callback = None
-            self.runtime_hooks.acquire_gpu()
-            self._gpu_acquired = True
+    def _vision_supports_context_injection(self, caption_model: Any) -> bool:
+        return hasattr(caption_model, "_caption_runtime_model")
+
+    def _visual_context_key(self, media_record: dict[str, Any], frame_no: int | None) -> str:
+        media_id = str(media_record.get("media_id", "") or "").strip()
+        media_type = str(media_record.get("media_type", "") or "").strip().lower()
+        if media_type == "video":
+            resolved_frame = 0 if frame_no is None else int(frame_no)
+            return f"{media_id}@frame={resolved_frame}"
+        return media_id
+
+    def _run_visual_query(self, media_record: dict[str, Any], question: str | None = None, frame_no: int | None = None) -> dict[str, Any]:
         media_path = str(media_record.get("path", "")).strip()
+        media_type = str(media_record.get("media_type", "")).strip().lower()
+        resolved_frame = None if media_type != "video" else (0 if frame_no is None else int(frame_no))
+        context_key = self._visual_context_key(media_record, frame_no)
+        if self.session is not None and context_key in {str(value or "").strip() for value in list(self.session.visual_context_media_ids or []) if len(str(value or "").strip()) > 0}:
+            return {
+                "status": "ok",
+                "media_id": media_record.get("media_id", ""),
+                "media_type": media_type,
+                "label": media_record.get("label", ""),
+                "frame_no": resolved_frame,
+                "loaded_into_context": True,
+                "already_loaded": True,
+                "note": str(question or "").strip(),
+                "error": "",
+            }
         if len(media_path) == 0 or not os.path.isfile(media_path):
             raise FileNotFoundError(f"Media file not found: {media_path}")
         caption_model, caption_processor = self._ensure_vision_loaded()
-        media_type = str(media_record.get("media_type", "")).strip().lower()
         if media_type == "video":
-            image = get_video_frame(media_path, 0 if frame_no is None else int(frame_no), return_last_if_missing=True, return_PIL=True).convert("RGB")
+            image = get_video_frame(media_path, resolved_frame or 0, return_last_if_missing=True, return_PIL=True).convert("RGB")
         else:
             with Image.open(media_path) as image_handle:
                 image = image_handle.convert("RGB")
-        prompt_token_ids, prompt_embeds, prompt_position_ids, position_offset = deepy_vision.build_image_question_prompt(
+        if not self._vision_supports_context_injection(caption_model):
+            if len(str(question or "").strip()) == 0:
+                question = "Describe the visible content accurately and concisely."
+            prompt_token_ids, prompt_embeds, prompt_position_ids, position_offset = deepy_vision.build_image_question_prompt(
+                caption_model,
+                caption_processor,
+                image,
+                str(question or "").strip(),
+            )
+            if not self._gpu_acquired:
+                self.runtime_hooks.clear_gpu_resident()
+                self.session.release_vram_callback = None
+                self.runtime_hooks.acquire_gpu()
+                self._gpu_acquired = True
+            runtime = self._acquire_runtime()
+            answer = runtime.generate_embedded_answer(
+                prompt_token_ids,
+                prompt_embeds,
+                prompt_position_ids,
+                position_offset,
+                max_new_tokens=192,
+                seed=0,
+                do_sample=False,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+            )
+            return {
+                "status": "done",
+                "media_id": media_record.get("media_id", ""),
+                "media_type": media_type,
+                "label": media_record.get("label", ""),
+                "frame_no": resolved_frame,
+                "question": str(question or "").strip(),
+                "answer": answer,
+                "loaded_into_context": False,
+                "error": "",
+            }
+        context_note = str(question or deepy_vision.VISION_CONTEXT_NOTE).strip() or deepy_vision.VISION_CONTEXT_NOTE
+        prompt_token_ids, prompt_embeds, prompt_position_ids, position_offset = deepy_vision.build_image_context_prompt(
             caption_model,
             caption_processor,
             image,
-            question,
+            note=context_note,
         )
+        runtime = self._acquire_runtime()
         if self.debug_enabled:
             prompt_embeds_shape = None if prompt_embeds is None else tuple(int(x) for x in prompt_embeds.shape)
             prompt_position_shape = None if prompt_position_ids is None else tuple(int(x) for x in prompt_position_ids.shape)
-            prompt_embeds_dtype = None if prompt_embeds is None else str(prompt_embeds.dtype).replace("torch.", "")
-            prompt_position_dtype = None if prompt_position_ids is None else str(prompt_position_ids.dtype).replace("torch.", "")
             self._log(
-                "Inspect visual query "
+                "Inspect visual context inject "
                 f"media_id={media_record.get('media_id', '')} media_type={media_type} image_size={image.size} "
-                f"question={question!r} prompt_tokens={len(prompt_token_ids)} "
-                f"prompt_embeds_shape={prompt_embeds_shape} prompt_embeds_dtype={prompt_embeds_dtype} "
-                f"prompt_position_ids_shape={prompt_position_shape} prompt_position_ids_dtype={prompt_position_dtype} "
+                f"note={context_note!r} prompt_tokens={len(prompt_token_ids)} "
+                f"prompt_embeds_shape={prompt_embeds_shape} prompt_position_ids_shape={prompt_position_shape} "
                 f"position_offset={int(position_offset or 0)}"
             )
-        runtime = self._acquire_runtime()
-        answer = runtime.generate_embedded_answer(
-            prompt_token_ids,
-            prompt_embeds,
-            prompt_position_ids,
-            position_offset,
-            max_new_tokens=192,
-            seed=0,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            top_k=None,
+        self._run_prefill_call(
+            len(prompt_token_ids),
+            lambda: runtime.append_embedded_suffix(
+                prompt_token_ids,
+                prompt_embeds,
+                prompt_position_ids,
+                position_offset=int(position_offset or 0),
+            ),
+            record_if=lambda result: result == "embedded_appended",
         )
+        self._record_live_context("Inspect Media loaded visual context into the live assistant runtime.")
+        if self.session is not None:
+            loaded_ids = [str(value or "").strip() for value in list(self.session.visual_context_media_ids or []) if len(str(value or "").strip()) > 0]
+            if context_key not in loaded_ids:
+                loaded_ids.append(context_key)
+            self.session.visual_context_media_ids = loaded_ids
         return {
-            "status": "done",
+            "status": "ok",
             "media_id": media_record.get("media_id", ""),
             "media_type": media_type,
             "label": media_record.get("label", ""),
-            "frame_no": None if media_type != "video" else (0 if frame_no is None else int(frame_no)),
-            "question": str(question or "").strip(),
-            "answer": answer,
+            "frame_no": resolved_frame,
+            "loaded_into_context": True,
+            "already_loaded": False,
+            "note": context_note,
             "error": "",
         }
 
