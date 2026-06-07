@@ -48,11 +48,24 @@ class GemmaTextEncoderModelBase(torch.nn.Module):
             self.feature_extractor_linear = None
 
     def encode_raw(self, text: str, padding_side: str = "left") -> "RawTextEmbeddings":
-        token_pairs = self.tokenizer.tokenize_with_weights(text)["gemma"]
-        input_ids = torch.tensor([[t[0] for t in token_pairs]], device=self.model.device)
-        attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=self.model.device)
+        return self.encode_raw_batch([text], padding_side=padding_side)[0]
+
+    def encode_raw_batch(self, texts: list[str], padding_side: str = "left") -> list["RawTextEmbeddings"]:
+        if not texts:
+            return []
+        token_rows = [self.tokenizer.tokenize_with_weights(text)["gemma"] for text in texts]
+        input_ids = torch.tensor([[token[0] for token in row] for row in token_rows], device=self.model.device)
+        attention_mask = torch.tensor([[token[1] for token in row] for row in token_rows], device=self.model.device)
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
-        return RawTextEmbeddings(outputs.hidden_states, attention_mask, padding_side)
+        hidden_states = outputs.hidden_states
+        return [
+            RawTextEmbeddings(
+                tuple(layer[index : index + 1] for layer in hidden_states),
+                attention_mask[index : index + 1],
+                padding_side,
+            )
+            for index in range(len(texts))
+        ]
 
     def _run_feature_extractor(
         self, hidden_states: torch.Tensor, attention_mask: torch.Tensor, padding_side: str = "right"
@@ -388,10 +401,9 @@ def encode_text(text_encoder: GemmaTextEncoderModelBase, prompts: list[str]) -> 
     """
     Encode prompts with the Gemma text encoder, returning raw embeddings for later post-processing.
     """
-    result = []
-    for prompt in prompts:
-        result.append(text_encoder.encode_raw(prompt))
-    return result
+    if not prompts:
+        return []
+    return text_encoder.encode_raw_batch(prompts)
 
 
 def postprocess_text_embeddings(

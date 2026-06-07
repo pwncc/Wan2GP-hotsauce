@@ -1,6 +1,5 @@
 import html
 import re
-import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -160,7 +159,7 @@ def render_search_results(deps, state, query):
 
 def apply_search_selection(model_type):
     model_type = str(model_type or "").strip()
-    return (f"{model_type}|{time.time()}" if model_type else gr.update()), *clear_search_panel()
+    return (model_type if model_type else gr.update()), *clear_search_panel()
 
 
 def _prune_orphan_model_settings(state, deps):

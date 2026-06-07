@@ -8,11 +8,16 @@ from shared.attention import pay_attention
 from .rope import LTXRopeType, apply_rotary_emb_inplace
 
 memory_efficient_attention = None
+flash_attn_func = None
 flash_attn_interface = None
 try:
     from xformers.ops import memory_efficient_attention
 except ImportError:
     memory_efficient_attention = None
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    flash_attn_func = None
 try:
     # FlashAttention3 and XFormersAttention cannot be used together
     if memory_efficient_attention is None:
@@ -93,6 +98,29 @@ class XFormersAttention(AttentionCallable):
         return out
 
 
+class FlashAttention2(AttentionCallable):
+    def __call__(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        heads: int,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if flash_attn_func is None:
+            raise RuntimeError("FlashAttention2 was selected but `flash_attn` is not installed.")
+        if mask is not None:
+            raise NotImplementedError("Mask is not supported for FlashAttention2")
+
+        b, _, dim_head = q.shape
+        dim_head //= heads
+
+        q, k, v = (t.view(b, -1, heads, dim_head) for t in (q, k, v))
+        out = flash_attn_func(q.to(v.dtype), k.to(v.dtype), v, dropout_p=0.0, causal=False)
+        out = out.reshape(b, -1, heads * dim_head)
+        return out
+
+
 class FlashAttention3(AttentionCallable):
     def __call__(
         self,
@@ -121,6 +149,7 @@ class FlashAttention3(AttentionCallable):
 class AttentionFunction(Enum):
     PYTORCH = "pytorch"
     XFORMERS = "xformers"
+    FLASH_ATTENTION_2 = "flash_attention_2"
     FLASH_ATTENTION_3 = "flash_attention_3"
     DEFAULT = "default"
 
@@ -131,15 +160,16 @@ class AttentionFunction(Enum):
             return PytorchAttention()(q, k, v, heads, mask)
         elif self is AttentionFunction.XFORMERS:
             return XFormersAttention()(q, k, v, heads, mask)
+        elif self is AttentionFunction.FLASH_ATTENTION_2:
+            return FlashAttention2()(q, k, v, heads, mask)
         elif self is AttentionFunction.FLASH_ATTENTION_3:
             return FlashAttention3()(q, k, v, heads, mask)
         else:
-            # Default behavior: XFormers if installed else - PyTorch
-            return (
-                XFormersAttention()(q, k, v, heads, mask)
-                if memory_efficient_attention is not None
-                else PytorchAttention()(q, k, v, heads, mask)
-            )
+            if mask is None and flash_attn_func is not None:
+                return FlashAttention2()(q, k, v, heads, mask)
+            if memory_efficient_attention is not None:
+                return XFormersAttention()(q, k, v, heads, mask)
+            return PytorchAttention()(q, k, v, heads, mask)
 
 
 class DBMRMSNorm(torch.nn.Module):
@@ -195,6 +225,8 @@ class Attention(torch.nn.Module):
                 return "sdpa", None
             if self.attention_function is AttentionFunction.XFORMERS:
                 return "xformers", None
+            if self.attention_function is AttentionFunction.FLASH_ATTENTION_2:
+                return "flash", 2
             if self.attention_function is AttentionFunction.FLASH_ATTENTION_3:
                 return "flash", 3
         return None, None

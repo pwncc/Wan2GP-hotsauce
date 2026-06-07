@@ -302,6 +302,9 @@ class TI2VidTwoStagesPipeline:
         video_encoder = self._get_stage_model(1, "video_encoder")
         transformer = self._get_stage_model(1, "transformer")
         bind_interrupt_check(transformer, interrupt_check)
+        from shared.qtypes.gguf import warmup_gguf_cuda_kernels
+
+        warmup_gguf_cuda_kernels(getattr(transformer, "model", transformer))
         stage_1_ref_conditionings, stage_1_ref_context, stage_1_ref_adaln = build_editanything_reference_conditioning(
             transformer,
             editanything_ref_images,
@@ -518,6 +521,8 @@ class TI2VidTwoStagesPipeline:
             latent_slice = None
             if return_latent_slice is not None:
                 latent_slice = video_state.latent[:, :, return_latent_slice].detach().to("cpu")
+            if set_progress_status is not None:
+                set_progress_status("VAE Decoding")
             if frozen_output_video is None:
                 decoded_video = vae_decode_video_to_tensor(
                     video_state.latent,

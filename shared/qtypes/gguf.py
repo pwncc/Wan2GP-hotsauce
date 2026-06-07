@@ -1750,6 +1750,40 @@ def _collect_gguf_specs(state_dict):
     return specs
 
 
+def warmup_gguf_cuda_kernels(root_module: torch.nn.Module) -> int:
+    """Run tiny forwards so llama.cpp CUDA GGUF kernels compile before step 1."""
+    if not _gguf_cuda_kernels_enabled() or root_module is None:
+        return 0
+    seen_qtypes: set[str] = set()
+    warmed = 0
+    with torch.inference_mode():
+        for module in root_module.modules():
+            if not isinstance(module, QLinearGGUF):
+                continue
+            qweight = module.qweight
+            if not isinstance(qweight, GGUFWeightTensor):
+                continue
+            qtype_name = _gguf_qtype_name(getattr(qweight, "_tensor_type", None))
+            if not qtype_name or qtype_name in seen_qtypes:
+                continue
+            device = qweight.device
+            if device.type != "cuda":
+                continue
+            dummy = torch.zeros((1, module.in_features), dtype=torch.bfloat16, device=device)
+            if not _may_try_llamacpp_cuda_linear(qweight, dummy):
+                continue
+            module(dummy)
+            seen_qtypes.add(qtype_name)
+            warmed += 1
+        if warmed > 0 and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            _gguf_log_once(
+                "gguf_cuda_warmup_done",
+                f"[GGUF][llama.cpp CUDA] Warmed {warmed} quantized kernel type(s) before inference.",
+            )
+    return warmed
+
+
 def detect(state_dict, verboseLevel=1):
     if gguf is None:
         return {"matched": False, "kind": "none", "details": {"error": "gguf not installed"}}

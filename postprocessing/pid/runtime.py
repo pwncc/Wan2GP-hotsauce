@@ -6,6 +6,7 @@ import torch
 from accelerate import init_empty_weights
 
 from shared.attention import attention_config_shared_state
+from shared.utils.hot_models import enable_keep_models_hot, global_keep_models_hot_enabled, load_all_models_to_vram, unload_all_unless_hot
 from postprocessing.pid.networks import PidNet
 from postprocessing.pid.networks.pixeldit_official import get_pid_linear_split_map
 
@@ -664,7 +665,7 @@ class PiDUpsamplerSession:
 
     def unload_main_model_vram(self):
         if self.main_offloadobj is not None:
-            self.main_offloadobj.unload_all()
+            unload_all_unless_hot(self.main_offloadobj)
 
     def __getattr__(self, name):
         self.ensure_loaded()
@@ -715,6 +716,9 @@ class PiDRuntime:
         _apply_pid_offload_budgets(pipe, kwargs)
         kwargs["pinnedMemory"] = False
         self.offloadobj = offload.profile(pipe, profile_no=profile_no, quantizeTransformer=False, convertWeightsFloatTo=dtype, verboseLevel=-1, **kwargs)
+        if global_keep_models_hot_enabled():
+            enable_keep_models_hot(self.offloadobj)
+            load_all_models_to_vram(self.offloadobj)
         self.backbone = backbone
         self.profile = profile
         self.ckpt_types = ckpt_types
@@ -736,7 +740,7 @@ class PiDRuntime:
 
     def _unload_mmgp(self):
         if self.offloadobj is not None:
-            self.offloadobj.unload_all()
+            unload_all_unless_hot(self.offloadobj)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 

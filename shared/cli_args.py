@@ -33,6 +33,8 @@ def parse_wgp_args(family_handlers: Sequence[str], config_filename: str, default
     add("--debug-gen-form", action="store_true", help="View form generation / refresh time")
     add("--betatest", action="store_true", help="test unreleased features")
     add("--vram-safety-coefficient", type=float, default=0.8, help="max VRAM (between 0 and 1) that should be allocated to preloaded models")
+    add("--keep-models-hot", action="store_true", help="Keep model components resident in VRAM during inference instead of CPU/RAM offloading")
+    add("--disable-step-preview", action="store_true", help="Disable live latent step preview during generation")
     add("--share", action="store_true", help="Create a shared URL to access webserver remotely")
     add("--lock-config", action="store_true", help="Prevent modifying the configuration from the web interface")
     add("--lock-model", action="store_true", help="Prevent switch models")

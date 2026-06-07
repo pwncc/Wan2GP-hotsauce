@@ -20,6 +20,7 @@ from tqdm import tqdm
 from mmgp import offload
 from models.wan.modules.vae import WanVAE
 from shared.attention import attention_config_shared_state
+from shared.utils.hot_models import enable_keep_models_hot, global_keep_models_hot_enabled, load_all_models_to_vram, unload_all_unless_hot
 from .attention_backend import log_sparse_backend, require_sparge_attention
 from .tcdecoder import build_tcdecoder
 from .utils import Causal_LQ4x_Proj
@@ -454,6 +455,9 @@ class FlashVSRRuntime:
         kwargs = {"coTenantsMap": FLASHVSR_COTENANTS_MAP}
         profile_no = init_pipe(pipe, kwargs, profile)
         self.offloadobj = offload.profile(pipe, profile_no=profile_no, quantizeTransformer=False, convertWeightsFloatTo=self.dtype, verboseLevel=-1, **kwargs)
+        if global_keep_models_hot_enabled():
+            enable_keep_models_hot(self.offloadobj)
+            load_all_models_to_vram(self.offloadobj)
         log_sparse_backend()
 
     def _prepare_run_state(self) -> None:
@@ -481,7 +485,7 @@ class FlashVSRRuntime:
     def _unload_mmgp(self) -> None:
         self._clear_runtime_caches()
         if self.offloadobj is not None:
-            self.offloadobj.unload_all()
+            unload_all_unless_hot(self.offloadobj)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 

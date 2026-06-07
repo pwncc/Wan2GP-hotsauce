@@ -10,6 +10,7 @@ from mmgp import offload as mmgp_offload
 from tqdm import tqdm
 
 from shared.utils.text_encoder_cache import TextEncoderCache
+from shared.utils.hot_models import unload_all_unless_hot
 
 from .ltx2 import _VAEContainer, _load_config_from_checkpoint, _make_sd_postprocess, _make_vae_postprocess
 from .ltx_core.components.diffusion_steps import EulerDiffusionStep
@@ -208,7 +209,7 @@ class LTXAudioTTSPipelineBase:
         for module in model.modules():
             manager = getattr(module, "_mm_manager", None)
             if manager is not None:
-                manager.unload_all()
+                unload_all_unless_hot(manager)
                 return
 
     def _encode_prompt(self, prompt: str) -> torch.Tensor:

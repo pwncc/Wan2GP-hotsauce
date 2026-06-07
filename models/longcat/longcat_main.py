@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from transformers import AutoFeatureExtractor, Wav2Vec2FeatureExtractor, WhisperModel
 
 from shared.utils import files_locator as fl
+from shared.utils.hot_models import unload_all_unless_hot
 from ..wan.modules.t5 import T5EncoderModel
 from .modules.longcat_video_dit import LongCatVideoTransformer3DModel
 from .modules.avatar.longcat_video_dit_avatar import LongCatVideoAvatarTransformer3DModel
@@ -936,7 +937,7 @@ class LongCatModel:
             if ref_target_masks is not None:
                 ref_target_masks = ref_target_masks.to(self.device)
             if self.is_avatar_v1_5 and offloadobj is not None:
-                offloadobj.unload_all()
+                unload_all_unless_hot(offloadobj)
             audio_emb = audio_emb.to(self.device, dtype=self.dtype)
 
         latents = latents.to(self.device, dtype=self.dtype)

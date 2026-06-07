@@ -6,6 +6,8 @@ from typing import Any, Callable, Iterable, Hashable
 
 import torch
 
+from shared.utils.hot_models import global_keep_models_hot_enabled
+
 
 @dataclass
 class _CacheEntry:
@@ -88,7 +90,7 @@ class TextEncoderCache:
         return results
 
     def _store(self, cache_key: Hashable, encoded: Any, device: torch.device | str | None) -> Any:
-        cached_value = self._detach_to_cpu(encoded)
+        cached_value = self._detach_for_cache(encoded)
         size_bytes = self._estimate_size_bytes(cached_value)
         if size_bytes <= self.max_size_bytes:
             existing = self._entries.pop(cache_key, None)
@@ -101,6 +103,11 @@ class TextEncoderCache:
             if cache_key in self._entries:
                 self._entries.move_to_end(cache_key)
         return self._to_device(encoded, device)
+
+    def _detach_for_cache(self, value: Any) -> Any:
+        if global_keep_models_hot_enabled():
+            return self._detach(value)
+        return self._detach_to_cpu(value)
 
     def _purge_if_needed(self) -> None:
         if self._size_bytes <= self.max_size_bytes:
@@ -132,6 +139,20 @@ class TextEncoderCache:
             return tuple(items)
         if isinstance(value, list):
             return [self._detach_to_cpu(v) for v in value]
+        return value
+
+    def _detach(self, value: Any) -> Any:
+        if torch.is_tensor(value):
+            return value.detach()
+        if isinstance(value, dict):
+            return {k: self._detach(v) for k, v in value.items()}
+        if isinstance(value, tuple):
+            items = [self._detach(v) for v in value]
+            if hasattr(value, "_fields"):
+                return value.__class__(*items)
+            return tuple(items)
+        if isinstance(value, list):
+            return [self._detach(v) for v in value]
         return value
 
     def _to_device(self, value: Any, device: torch.device | str | None) -> Any:

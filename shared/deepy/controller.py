@@ -37,6 +37,7 @@ from shared.deepy.engine import (
     tools as AssistantTools,
 )
 from shared.gradio import assistant_chat
+from shared.utils.hot_models import unload_all_unless_hot
 from shared.utils.thread_utils import AsyncStream, async_run_in
 
 
@@ -177,7 +178,7 @@ class DeepyController:
     def _unload_weights(self) -> None:
         enhancer_offloadobj = self._deps.get_enhancer_offloadobj()
         if enhancer_offloadobj is not None:
-            enhancer_offloadobj.unload_all()
+            unload_all_unless_hot(enhancer_offloadobj)
 
     def _build_preload_release_callback(self) -> Callable[[], None]:
         def _release_preloaded_runtime() -> None:

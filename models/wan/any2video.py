@@ -46,6 +46,7 @@ from .alpha.utils import load_gauss_mask, apply_alpha_shift
 from shared.utils.audio_video import save_video
 from shared.utils.text_encoder_cache import TextEncoderCache
 from shared.utils.self_refiner import PnPHandler, create_self_refiner_handler
+from shared.utils.hot_models import unload_all_unless_hot
 from mmgp import safetensors2
 from shared.utils import files_locator as fl 
 
@@ -587,7 +588,7 @@ class WanAny2V:
         # context_NAG = torch.cat([context_NAG, context_NAG.new_zeros(text_len -context_NAG.size(0), context_NAG.size(1)) ]).unsqueeze(0) 
         
         from mmgp import offload
-        offloadobj.unload_all()
+        unload_all_unless_hot(offloadobj)
 
         offload.shared_state.update({"_nag_scale" : NAG_scale, "_nag_tau" : NAG_tau, "_nag_alpha":  NAG_alpha })
         if NAG_scale > 1: context = torch.cat([context, context_null], dim=0)

@@ -5,6 +5,8 @@ import os
 import tempfile
 from typing import Any, Callable
 
+from shared.utils.hot_models import enable_keep_models_hot, global_keep_models_hot_enabled, load_all_models_to_vram, unload_all_unless_hot
+
 
 _persistent_converter = None
 _persistent_offloadobj = None
@@ -17,7 +19,7 @@ def _release_runtime_objects(converter=None, offloadobj=None) -> None:
     import torch
 
     if offloadobj is not None:
-        offloadobj.unload_all()
+        unload_all_unless_hot(offloadobj)
         offloadobj.release()
     del converter
     if torch.cuda.is_available():
@@ -55,6 +57,9 @@ def _get_runtime(persistent_models: bool, profile_no=4, verbose_level: int = 1, 
             profile_no = init_pipe(pipe, offload_kwargs, profile_no)
         offload_kwargs["pinnedMemory"] = False
         offloadobj = offload.profile(pipe, profile_no=profile_no, quantizeTransformer=False, convertWeightsFloatTo=torch.float16, verboseLevel=verbose_level, **offload_kwargs)
+        if global_keep_models_hot_enabled():
+            enable_keep_models_hot(offloadobj)
+            load_all_models_to_vram(offloadobj)
         if persistent_models:
             _persistent_converter = converter
             _persistent_offloadobj = offloadobj
@@ -92,7 +97,7 @@ def convert_audio_file(source_audio_path: str, voice_sample_path: str, output_pa
         write_wav_file(output_path, converted, source_rate)
     finally:
         if offloadobj is not None:
-            offloadobj.unload_all()
+            unload_all_unless_hot(offloadobj)
         if not keep_alive:
             _release_runtime_objects(converter, offloadobj)
     return output_path

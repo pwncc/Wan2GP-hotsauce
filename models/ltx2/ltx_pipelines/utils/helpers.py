@@ -1443,6 +1443,11 @@ def guider_denoising_func(
 
     def _prewarm(video_state: LatentState, audio_state: LatentState, sigmas: torch.Tensor) -> None:
         nonlocal prepared_v_context_p, prepared_v_context_n, prepared_a_context_p, prepared_a_context_n
+        if transformer is not None and not getattr(transformer, "_gguf_warmed", False):
+            from shared.qtypes.gguf import warmup_gguf_cuda_kernels
+
+            warmup_gguf_cuda_kernels(getattr(transformer, "model", transformer))
+            transformer._gguf_warmed = True
         if prepared_v_context_p is None:
             prepared_v_context_p = _prepare_conditioning_context(transformer, video_state, v_context_p, sigmas, is_audio=False)
         if prepared_a_context_p is None:

@@ -12,6 +12,7 @@ from .model.sequence_config import SequenceConfig
 from .model.utils.features_utils import FeaturesUtils
 from shared.utils import files_locator as fl
 from shared.utils.audio_video import write_wav_file
+from shared.utils.hot_models import enable_keep_models_hot, global_keep_models_hot_enabled, load_all_models_to_vram, unload_all_unless_hot
 
 persistent_offloadobj = None
 persistent_model_id = None
@@ -93,7 +94,7 @@ def get_model(persistent_models = False, verboseLevel = 1, model_name = None, mo
     model_id = (model_name, os.path.normcase(str(resolved_model_path)))
 
     if persistent_offloadobj is not None and persistent_model_id != model_id:
-        persistent_offloadobj.unload_all()
+        unload_all_unless_hot(persistent_offloadobj)
         persistent_offloadobj.release()
         persistent_offloadobj = None
         persistent_net = None
@@ -119,7 +120,12 @@ def get_model(persistent_models = False, verboseLevel = 1, model_name = None, mo
 
         pipe = { "net" : net, "clip" : feature_utils.clip_model, "syncformer" : feature_utils.synchformer, "vocode" : feature_utils.tod.vocoder, "vae" : feature_utils.tod.vae }
         from mmgp import offload
-        offloadobj = offload.profile(pipe, profile_no=4, verboseLevel=2)
+        keep_hot = global_keep_models_hot_enabled()
+        offload_kwargs = {"budgets": None, "pinnedMemory": False, "asyncTransfers": False} if keep_hot else {}
+        offloadobj = offload.profile(pipe, profile_no=3 if keep_hot else 4, verboseLevel=2, **offload_kwargs)
+        if keep_hot:
+            enable_keep_models_hot(offloadobj)
+            load_all_models_to_vram(offloadobj)
         if persistent_models:
             persistent_offloadobj = offloadobj
             persistent_net = net
@@ -184,7 +190,7 @@ def video_to_audio(video, prompt: str, negative_prompt: str, seed: int, num_step
     else:
         make_video(video, video_info, save_path, audio, sampling_rate=seq_cfg.sampling_rate, audio_codec_key=audio_codec_key)
 
-    offloadobj.unload_all()
+    unload_all_unless_hot(offloadobj)
     if not persistent_models:
         offloadobj.release()
 

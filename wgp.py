@@ -76,6 +76,7 @@ from shared.utils.process_locks import (
     unregister_GPU_resident,
 )
 from shared.utils.model_unload import model_unload_guard, wait_for_model_unload
+from shared.utils.hot_models import enable_keep_models_hot, load_all_models_to_vram, set_global_keep_models_hot, unload_all_unless_hot
 from shared.deepy.config import get_deepy_default_runtime_config, set_deepy_runtime_config
 from shared.loras_migration import migrate_loras_layout
 from shared.utils import files_locator as fl 
@@ -2239,6 +2240,7 @@ def get_lora_dir(model_type):
 attention_modes_installed = get_attention_modes()
 attention_modes_supported = get_supported_attention_modes()
 args = parse_wgp_args(family_handlers, CONFIG_FILENAME, DEFAULT_LORA_ROOT)
+set_global_keep_models_hot(args.keep_models_hot)
 migrate_loras_layout()
 
 gpu_major, gpu_minor = torch.cuda.get_device_capability(args.gpu if len(args.gpu) > 0 else None)
@@ -3643,6 +3645,8 @@ def get_default_profile(output_type):
     return default_profile_video
 
 def compute_profile(override_profile, output_type="video"):
+    if args.keep_models_hot:
+        return 3.5
     return override_profile if override_profile != -1 else get_default_profile(output_type)
 
 def get_profile_type_for_model(model_type, image_mode=0):
@@ -3662,6 +3666,12 @@ def init_pipe(pipe, kwargs, profile):
         preload = server_config.get("preload_in_VRAM", 0)
 
     kwargs["extraModelsToQuantize"]=  None
+    if args.keep_models_hot:
+        kwargs["budgets"] = None
+        kwargs["pinnedMemory"] = False
+        kwargs["asyncTransfers"] = False
+        return int(profile_type.LowRAM_HighVRAM)
+
     source_budgets = kwargs.get("budgets", None)
     if source_budgets is None:  kwargs["budgets"] = source_budgets = {}
     mmgp_profile = int(profile)
@@ -3889,6 +3899,9 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
             _load_models_info("Pytorch compilation is not supported for this Model")
         # kwargs["pinnedMemory"] = "text_encoder"
         offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)
+        if args.keep_models_hot:
+            enable_keep_models_hot(offloadobj)
+            load_all_models_to_vram(offloadobj)
     if len(args.gpu) > 0:
         torch.set_default_device(args.gpu)
     transformer_type = model_type
@@ -3978,7 +3991,7 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
             pause_msg = None
             if isinstance(process_status, str) and process_status.startswith("request:"):
                 gen["process_status"] = "process:" + process_status[len("request:"):]
-                offloadobj.unload_all()
+                unload_all_unless_hot(offloadobj)
                 pause_msg = gen.get("pause_msg", "Unknown Pause")
                 in_pause = True
 
@@ -4059,7 +4072,7 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
         
         # progress(*progress_args)
         send_cmd("progress", progress_args)
-        if latent is not None:
+        if latent is not None and not args.disable_step_preview:
             payload = pipe.prepare_preview_payload(latent, preview_meta) if hasattr(pipe, "prepare_preview_payload") else latent
             if isinstance(payload, dict):
                 data = payload.copy()
@@ -5999,7 +6012,7 @@ def process_prompt_enhancer(model_type, model_def, prompt_enhancer, original_pro
         post_image_caption_hook = None
         if len(prompt_images) > 0 and enhancer_offloadobj is not None:
             if hasattr(prompt_enhancer_image_caption_model, "vision_tower_model") and hasattr(prompt_enhancer_llm_model, "generate_messages"):
-                post_image_caption_hook = enhancer_offloadobj.unload_all
+                post_image_caption_hook = lambda: unload_all_unless_hot(enhancer_offloadobj)
         prompts = generate_cinematic_prompt(
             prompt_enhancer_image_caption_model,
             prompt_enhancer_image_caption_processor,
@@ -6078,14 +6091,14 @@ def exec_prompt_enhancer_engine(state, model_type, model_def, prompt_enhancer_mo
             enhanced_prompt = process_prompt_enhancer(model_type, model_def, prompt_enhancer_modes, [one_prompt],  start_images, original_image_refs, is_image, audio_only, seed, enhancer_kwargs = enhancer_kwargs)
         except Exception as e:
             unload_prompt_enhancer_runtime()
-            enhancer_offloadobj.unload_all()
+            unload_all_unless_hot(enhancer_offloadobj)
             release_GPU_ressources(state, "prompt_enhancer")
             print(traceback.format_exc())
             raise gr.Error(e)
         enhanced_prompts.append(enhanced_prompt)
 
     unload_prompt_enhancer_runtime()
-    enhancer_offloadobj.unload_all()
+    unload_all_unless_hot(enhancer_offloadobj)
 
     release_GPU_ressources(state, "prompt_enhancer")
     return enhanced_prompts
@@ -6565,8 +6578,9 @@ def generate_video(
         finally:
             unload_prompt_enhancer_runtime()
             if enhancer_offloadobj is not None:
-                enhancer_offloadobj.unload_all()
+                unload_all_unless_hot(enhancer_offloadobj)
     if args.test:
+        load_all_models_to_vram(offloadobj)
         if pid_upsampler_session is not None and not pid_persistent:
             release_pid_models()
         send_cmd("info", "Test mode: model loaded, skipping generation.")
@@ -6646,7 +6660,7 @@ def generate_video(
         errors = check_loras_exist(model_type, loras_selected, True, send_cmd)
         if len(errors) > 0 : raise gr.Error(errors)
         loras_selected = [ get_lora_local_path(lora_dir, lora) for lora in loras_selected]
-        pinnedLora = not is_mps and loaded_profile !=5  # and transformer_loras_filenames == None False # # #
+        pinnedLora = not args.keep_models_hot and not is_mps and loaded_profile !=5  # and transformer_loras_filenames == None False # # #
         preprocess_target = trans_lora if trans_lora is not None else trans
         split_linear_modules_map = getattr(preprocess_target, "split_linear_modules_map", None)
         offload.load_loras_into_model(
@@ -6665,6 +6679,9 @@ def generate_video(
             raise gr.Error("Error while loading Loras: " + ", ".join(error_files))
         if trans2_lora is not None: 
             offload.sync_models_loras(trans_lora, trans2_lora)
+        load_all_models_to_vram(offloadobj, force=True)
+    else:
+        load_all_models_to_vram(offloadobj)
         
     seed = None if seed == -1 else seed
     # negative_prompt = "" # not applicable in the inference
@@ -6936,7 +6953,7 @@ def generate_video(
             finally:
                 unload_prompt_enhancer_runtime()
                 if enhancer_offloadobj is not None:
-                    enhancer_offloadobj.unload_all()
+                    unload_all_unless_hot(enhancer_offloadobj)
             if enhanced_prompts is not None:
                 print(f"Enhanced prompts: {enhanced_prompts}" )
                 enhanced_prompts = [normalize_generated_prompt_lines(one_prompt, multi_prompts_gen_type) for one_prompt in enhanced_prompts]
@@ -7449,7 +7466,7 @@ def generate_video(
                     cleanup_temp_audio_files(control_audio_tracks + source_audio_tracks)
                 remove_temp_filenames(temp_filenames_list)
                 clear_gen_cache()
-                offloadobj.unload_all()
+                unload_all_unless_hot(offloadobj)
                 trans.cache = None 
                 if trans2 is not None: 
                     trans2.cache = None 
@@ -7515,9 +7532,11 @@ def generate_video(
                     samples = samples.to("cpu")
   
             clear_gen_cache()
-            offloadobj.unload_all()
-            gc.collect()
-            torch.cuda.empty_cache()
+            gen["defer_model_unload"] = samples is not None
+            if not gen["defer_model_unload"]:
+                unload_all_unless_hot(offloadobj)
+                gc.collect()
+                torch.cuda.empty_cache()
 
             if samples == None:
                 abort = True
@@ -7737,6 +7756,11 @@ def generate_video(
                     else:
                         save_video( tensor=output_video_frames, save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1),  codec_type= server_config.get("video_output_codec", None), container= container)
 
+                if gen.pop("defer_model_unload", False):
+                    unload_all_unless_hot(offloadobj)
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
                 end_time = time.time()
 
                 inputs.pop("send_cmd")
@@ -7798,6 +7822,10 @@ def generate_video(
                 send_cmd("output")
 
         seed = set_seed(-1)
+    if gen.pop("defer_model_unload", False):
+        unload_all_unless_hot(offloadobj)
+        gc.collect()
+        torch.cuda.empty_cache()
     clear_status(state)
     trans.cache = None
     offload.unload_loras_from_model(trans_lora)
@@ -12316,6 +12344,8 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             locals_dict = locals()
             locals_dict.update(custom_setting_components_map)
             gen_inputs = [locals_dict[k] for k in inputs_names] + [state, plugin_data]
+            model_switch_input_names = [k for k in inputs_names if not _is_media_output_component(locals_dict[k])]
+            model_switch_inputs = [locals_dict[k] for k in model_switch_input_names] + [state, plugin_data]
             save_settings_btn.click( fn=validate_wizard_prompt, inputs =[state, wizard_prompt_activated_var, wizard_variables_var,  prompt, wizard_prompt, *prompt_vars] , outputs= [prompt]).then(
                 save_inputs, inputs =[target_settings] + gen_inputs, outputs = [])
 
