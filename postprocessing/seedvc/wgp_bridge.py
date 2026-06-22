@@ -17,8 +17,10 @@ SEEDVC_RESTORE_BACKGROUND_STEM = True
 
 def _release_runtime_objects(converter=None, offloadobj=None) -> None:
     import torch
+    from shared.utils import offload_registry
 
     if offloadobj is not None:
+        offload_registry.unregister_offloadobj("SeedVC", offloadobj)
         unload_all_unless_hot(offloadobj)
         offloadobj.release()
     del converter
@@ -60,6 +62,8 @@ def _get_runtime(persistent_models: bool, profile_no=4, verbose_level: int = 1, 
         if global_keep_models_hot_enabled():
             enable_keep_models_hot(offloadobj)
             load_all_models_to_vram(offloadobj)
+        from shared.utils import offload_registry
+        offload_registry.register_offloadobj("SeedVC", offloadobj, release_models)
         if persistent_models:
             _persistent_converter = converter
             _persistent_offloadobj = offloadobj
@@ -321,7 +325,7 @@ class SeedVCBridge:
 
     def _replace_two_speaker_audio_file(self, source_audio_path: str, voice_sample_path: str, output_path: str, *, voice_sample2_path: str, process_files: Callable[..., Any], profile_no=4, verbose_level: int = 1, init_pipe: Callable[..., int] | None = None, prefix: str = "seedvc") -> str:
         import numpy as np
-        from preprocessing.speakers_separator import extract_dual_audio
+        from preprocessing.speaker_separator import extract_dual_audio
         from shared.utils.audio_video import cleanup_temp_audio_files
 
         output_dir = os.path.dirname(os.path.abspath(output_path)) or "."

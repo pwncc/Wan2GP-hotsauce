@@ -49,6 +49,13 @@ Spatial Upsampling increases the output resolution of the Image / Video by the S
 - Memory: high RAM/VRAM use; tiling reduces VRAM peaks for large targets.
 - Quality: strong detail recovery but some slight information may be loss due to VAE encoding
 - Caveat: image-only and x4 only.
+
+### Chain-of-Zoom
+- Works: images, generation and late postprocessing.
+- Speed: slow, each x2/x4 step runs a one step SD3 diffusion per tile plus a VLM prompt extraction per tile; x8/x16 chain several steps.
+- Memory: heavy downloads (SD3 Medium + Qwen2.5 VL 3B); MMGP swaps the models in VRAM so peaks stay moderate.
+- Quality: extreme magnification (up to x16) with text guided detail synthesis; invented details may diverge from the source at high zooms.
+- Caveat: image-only, supported factors x2 / x4 / x8 / x16.
 """,
     },
 }
@@ -114,7 +121,7 @@ def render_marker(elem_id, help_id, *, title=None, markdown=None, helper_popup_i
     info_button = _tool_button("info", popup_id, title, "&#9432;")
     helper_button = _tool_button("helper", helper_popup_id if has_helper else "", helper_title or "Prompt Helper", "&#129668;")
     return (
-        "<span class='wangp-field-help-inline'>"
+        f"<span class='wangp-field-help-inline' data-wangp-field-help-for='{html.escape(elem_id, quote=True)}'>"
         f"{info_button}{helper_button}"
         "</span>"
         f"{popup_html}"
@@ -191,8 +198,9 @@ def get_css():
     display: inline-flex !important;
     align-items: center;
     gap: 4px;
-    margin: 0 0 0 6px;
+    margin: -2px 0 -2px 6px;
     vertical-align: middle;
+    line-height: 0 !important;
 }
 .wangp-prompt-tools-empty {
     display: none !important;
@@ -205,11 +213,18 @@ def get_css():
     gap: 4px;
     vertical-align: middle;
     white-space: nowrap;
+    margin-block: -2px !important;
+    line-height: 0 !important;
 }
 .wangp-field-help-inline-host,
 .wangp-field-help-inline-host > *,
 .wangp-field-help-inline-host .html-container {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 0 !important;
     min-height: 0 !important;
+    height: 0 !important;
     margin: 0 !important;
     padding: 0 !important;
     border: 0 !important;
@@ -236,6 +251,7 @@ def get_css():
     vertical-align: middle;
     font-size: 11px !important;
     line-height: 1 !important;
+    overflow: hidden !important;
     opacity: 1 !important;
     visibility: visible !important;
 }
@@ -254,14 +270,8 @@ def get_javascript():
     window.wangpPromptTools = window.wangpPromptTools || {};
     window.wangpPromptTools.attach = function(root) {
         const scope = root && root.querySelectorAll ? root : document;
-        scope.querySelectorAll(".wangp-prompt-tools-row[data-wangp-prompt-tools-for]").forEach((row) => {
-            if (!row.isConnected) return;
-            const sourceRoot = row.parentElement;
-            const targetId = row.getAttribute("data-wangp-prompt-tools-for") || "";
-            const target = document.getElementById(targetId);
-            const label = target?.querySelector('[data-testid="block-info"]');
-            if (!label) return;
-            row.querySelectorAll("[data-wangp-model-info-open]").forEach((button) => {
+        function movePopups(sourceRoot, buttons) {
+            buttons.forEach((button) => {
                 const popupId = button.getAttribute("data-wangp-model-info-open");
                 if (!popupId) return;
                 const popups = Array.from(document.querySelectorAll("[id]")).filter((popup) => popup.id === popupId);
@@ -271,10 +281,32 @@ def get_javascript():
                 });
                 if (popup && popup.parentElement !== document.body) document.body.appendChild(popup);
             });
+        }
+        scope.querySelectorAll(".wangp-prompt-tools-row[data-wangp-prompt-tools-for]").forEach((row) => {
+            if (!row.isConnected) return;
+            const sourceRoot = row.parentElement;
+            const targetId = row.getAttribute("data-wangp-prompt-tools-for") || "";
+            const target = document.getElementById(targetId);
+            const label = target?.querySelector('[data-testid="block-info"]');
+            if (!label) return;
+            movePopups(sourceRoot, row.querySelectorAll("[data-wangp-model-info-open]"));
             label.querySelectorAll(".wangp-prompt-tools-row[data-wangp-prompt-tools-for]").forEach((existing) => {
                 if (existing !== row && existing.getAttribute("data-wangp-prompt-tools-for") === targetId) existing.remove();
             });
             if (row.isConnected && row.parentElement !== label) label.appendChild(row);
+        });
+        scope.querySelectorAll(".wangp-field-help-inline[data-wangp-field-help-for]").forEach((inline) => {
+            if (!inline.isConnected) return;
+            const sourceRoot = inline.parentElement;
+            const targetId = inline.getAttribute("data-wangp-field-help-for") || "";
+            const target = document.getElementById(targetId);
+            const label = target?.querySelector('[data-testid="block-info"]');
+            if (!label) return;
+            movePopups(sourceRoot, inline.querySelectorAll("[data-wangp-model-info-open]"));
+            label.querySelectorAll(".wangp-field-help-inline[data-wangp-field-help-for]").forEach((existing) => {
+                if (existing !== inline && existing.getAttribute("data-wangp-field-help-for") === targetId) existing.remove();
+            });
+            if (inline.isConnected && inline.parentElement !== label) label.appendChild(inline);
         });
     };
 """

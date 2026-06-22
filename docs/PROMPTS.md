@@ -255,11 +255,12 @@ Generic WanGP window commands:
 - `[/overlap]`: use the model's default overlap for this window
 - `[/overlap=9]`: use 9 overlap frames for this window, rounded to the model's overlap frame step
 - `[/overlap=0]`: use no overlap frames, when the model supports text-to-video windows
-- `[/new_shot]`: start this window without overlap frames, creating a hard transition
+- `[/new_shot]`: start this window without overlap frames, creating a hard transition, it is an alias for `[/overlap=0]`
+- `[/loras_mult=1;3]`: override the active LoRA multipliers for this window only. The selected LoRAs stay the same; use the same syntax as the LoRAs Multipliers field, such as `[/loras_mult=1;3 0.5;0.5]` for two active LoRAs. Windows without `[/loras_mult=...]` use the normal LoRA multipliers from the UI/default settings.
 
 Use `[/new_shot]` when a window should behave like a hard cut: a new scene, a new character introduction, or the first generated window after Continue Video when the source video should remain in the final output but should not visually condition the new generated window.
 
-Multiple commands can be combined in one bracket, for example `[/duration=5s,/overlap=9]` or `[/duration=4s,/new_shot]`.
+Multiple commands can be combined in one bracket, for example `[/duration=5s,/overlap=9]`, `[/duration=4s,/new_shot]`, or `[/duration=5s,/loras_mult=1;3]`.
 
 Overlap frames are generated in addition to the requested window duration. For example, a `[/duration=5s,/overlap=9]` window at 25 fps aims to contribute about 5 seconds to the final video, while the 9 overlap frames are only used to condition the transition and are not counted as newly committed output frames.
 
@@ -277,7 +278,7 @@ Example:
 [/duration=30%,/overlap=9] The chess player moves a knight, the train lights flicker, and the blue suitcase opens by itself, revealing a tiny glowing city.
 ```
 
-Models may declare their own additional slash commands. Unknown slash commands are rejected during validation. JoyAI-Echo adds memory commands such as `[/no_mem]`, `[/store_mem]`, `[/store_mem=2]`, `[/store_mem=man1,man2]`, `[/drop_mem]`, `[/drop_mem=2]`, `[/drop_mem=2-4]`, and `[/drop_mem=man1,woman1]`.
+Models may declare their own additional slash commands. Unknown slash commands are rejected during validation. JoyAI-Echo adds named-memory commands such as `[/store_mem=man1,man2]`, `[/load_mem=man1,woman1]`, `[/load_mem]`, and `[/drop_mem=old_scene]`. If a Joy window has no `[/load_mem...]`, it keeps the active memory set from the previous window plus any memory stored by that previous window. `[/no_mem]` is deprecated and ignored because Joy memories are no longer saved automatically.
 
 ### 3. All The Lines Are Part Of The Same Prompt
 

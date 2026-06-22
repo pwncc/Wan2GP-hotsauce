@@ -18,6 +18,22 @@ persistent_offloadobj = None
 persistent_model_id = None
 
 
+def release_models():
+    global persistent_offloadobj, persistent_net, persistent_features_utils, persistent_seq_cfg, persistent_model_id
+
+    if persistent_offloadobj is not None:
+        from shared.utils import offload_registry
+
+        offload_registry.unregister_offloadobj("MMAudio", persistent_offloadobj)
+        persistent_offloadobj.unload_all()
+        persistent_offloadobj.release()
+    persistent_offloadobj = None
+    persistent_net = None
+    persistent_features_utils = None
+    persistent_seq_cfg = None
+    persistent_model_id = None
+
+
 def _processing_device():
     if torch.cuda.is_available():
         return "cuda"
@@ -94,13 +110,7 @@ def get_model(persistent_models = False, verboseLevel = 1, model_name = None, mo
     model_id = (model_name, os.path.normcase(str(resolved_model_path)))
 
     if persistent_offloadobj is not None and persistent_model_id != model_id:
-        unload_all_unless_hot(persistent_offloadobj)
-        persistent_offloadobj.release()
-        persistent_offloadobj = None
-        persistent_net = None
-        persistent_features_utils = None
-        persistent_seq_cfg = None
-        persistent_model_id = None
+        release_models()
 
     if persistent_offloadobj == None:
         from accelerate import init_empty_weights
@@ -127,11 +137,14 @@ def get_model(persistent_models = False, verboseLevel = 1, model_name = None, mo
             enable_keep_models_hot(offloadobj)
             load_all_models_to_vram(offloadobj)
         if persistent_models:
+            from shared.utils import offload_registry
+
             persistent_offloadobj = offloadobj
             persistent_net = net
             persistent_features_utils = feature_utils
             persistent_seq_cfg = seq_cfg
             persistent_model_id = model_id
+            offload_registry.register_offloadobj("MMAudio", offloadobj, release_models)
 
     else:
         offloadobj = persistent_offloadobj  
