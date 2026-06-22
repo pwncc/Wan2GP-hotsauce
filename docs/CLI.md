@@ -106,6 +106,10 @@ python wgp.py --process queue.zip --output-dir ./out --attention sage2
 --preload NUMBER              # Preload N MB of diffusion model in VRAM
 --fp16                        # Force fp16 instead of bf16 models
 --gpu DEVICE                  # Run on specific GPU device (e.g., "cuda:1")
+--multi-gpu-offload           # Cache offloaded weights on secondary CUDA GPUs, then RAM
+--multi-gpu-offload-devices   # Secondary CUDA devices, comma-separated, or "auto"
+--multi-gpu-offload-vram-ratio FLOAT # Fraction of free secondary VRAM used for cache
+--disable-ram-weight-cache    # Leave uncached offload weights disk-backed
 ```
 
 ### Performance Profiles
@@ -120,6 +124,8 @@ python wgp.py --process queue.zip --output-dir ./out --attention sage2
 ```bash
 --perc-reserved-mem-max FLOAT # Max percentage of RAM for reserved memory (< 0.5)
 ```
+
+For mixed-GPU systems, `multi_gpu_offload` in `wgp_config.json` or `--multi-gpu-offload` keeps the primary GPU as the compute device and uses other visible CUDA GPUs as an offload cache before falling back to system RAM. This is intended to reduce repeated disk-backed weight reads during generation on systems such as a 4090 plus a 3080.
 
 ## Lora Configuration
 

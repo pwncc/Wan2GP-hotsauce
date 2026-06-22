@@ -78,6 +78,7 @@ from shared.utils.process_locks import (
 )
 from shared.utils.model_unload import model_unload_guard, wait_for_model_unload
 from shared.utils.hot_models import enable_keep_models_hot, load_all_models_to_vram, register_offload_manager, release_cuda_cache_if_needed, set_global_keep_models_hot, unload_all_unless_hot
+from shared.utils.multi_gpu_offload import enable_dynamic_offload_cache
 from shared.deepy.config import get_deepy_default_runtime_config, set_deepy_runtime_config
 from shared.loras_migration import migrate_loras_layout
 from shared.utils import files_locator as fl 
@@ -2431,6 +2432,10 @@ if not Path(config_load_filename).is_file():
         "image_profile": profile_type.LowRAM_LowVRAM,
         "audio_profile": 3.5,
         "preload_model_policy": [],
+        "multi_gpu_offload": 0,
+        "multi_gpu_offload_devices": "auto",
+        "multi_gpu_offload_vram_ratio": 0.80,
+        "ram_weight_cache": 1,
         "UI_theme": "default",
         "checkpoints_paths": fl.default_checkpoints_paths,
         "loras_root": DEFAULT_LORA_ROOT,
@@ -4016,6 +4021,34 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
             _load_models_info("Pytorch compilation is not supported for this Model")
         offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)
         register_offload_manager(offloadobj)
+        def _config_bool(value, default=False):
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value != 0
+            return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+        multi_gpu_offload_enabled = not args.keep_models_hot and (
+            args.multi_gpu_offload or _config_bool(server_config.get("multi_gpu_offload", 0))
+        )
+        if multi_gpu_offload_enabled:
+            secondary_devices = args.multi_gpu_offload_devices or server_config.get("multi_gpu_offload_devices", "auto")
+            secondary_vram_ratio = (
+                args.multi_gpu_offload_vram_ratio
+                if args.multi_gpu_offload
+                else float(server_config.get("multi_gpu_offload_vram_ratio", 0.80))
+            )
+            enable_dynamic_offload_cache(
+                offloadobj,
+                enabled=True,
+                primary_device=args.gpu or "cuda:0",
+                secondary_devices=secondary_devices,
+                secondary_vram_ratio=secondary_vram_ratio,
+                ram_cache=not args.disable_ram_weight_cache and _config_bool(server_config.get("ram_weight_cache", 1), True),
+                verbose=int(verbose_level),
+            )
         if args.keep_models_hot:
             enable_keep_models_hot(offloadobj)
             load_all_models_to_vram(offloadobj)
