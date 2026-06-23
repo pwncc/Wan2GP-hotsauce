@@ -11799,6 +11799,11 @@ def generate_media_tab(update_form = False, state_dict = None, ui_defaults = Non
                         custom_setting_dropdown_inputs.append(gr.Dropdown(choices=dropdown_choices or [], value=get_custom_setting_dropdown_value(setting_default, dropdown_choices) if dropdown_setting else None, label=setting_label if dropdown_setting else "", visible=setting_visible and dropdown_setting))
                 custom_settings_rows.append(custom_settings_row)
             custom_setting_extra_inputs = custom_setting_text_inputs + custom_setting_slider_inputs + custom_setting_dropdown_inputs
+            custom_setting_components_map = {
+                **{get_custom_setting_key(idx): component for idx, component in enumerate(custom_setting_text_inputs)},
+                **{get_custom_setting_slider_key(idx): component for idx, component in enumerate(custom_setting_slider_inputs)},
+                **{get_custom_setting_dropdown_key(idx): component for idx, component in enumerate(custom_setting_dropdown_inputs)},
+            }
             custom_settings_visibility_trigger = gr.Text(visible=False)
 
 
